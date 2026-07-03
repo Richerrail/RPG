@@ -8,7 +8,7 @@ Lance le jeu d'aventure en ligne
 
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify, send_file
 from game_engine import GameEngine
-from game_config import ITEMS, CLASSES, SKILLS, DAILY_QUESTS, LOCATIONS, SHOPS
+from game_config import GAME_CONFIG, ITEMS, CLASSES, SKILLS, LOCATIONS, SHOPS
 from translations import t
 import webbrowser
 import threading
@@ -37,68 +37,25 @@ def get_game_session():
         if 'player_class' in session:
             game_sessions[game_id].set_class(session['player_class'])
         
-        # Charger les stats sauvegardees si elles existent
+        # Charger les stats sauvegardées si elles existent
         if 'saved_stats' in session:
             saved_stats = session['saved_stats']
-            game_sessions[game_id].player_stats['exp'] = saved_stats.get('exp', 0)
-            game_sessions[game_id].player_stats['level'] = saved_stats.get('level', 1)
-            game_sessions[game_id].player_stats['gold'] = saved_stats.get('gold', 0)
-            game_sessions[game_id].player_stats['exp_for_next_level'] = saved_stats.get('exp_for_next_level', 100)
+            # Utiliser la fonction centralisée pour restaurer toutes les stats
+            game_sessions[game_id].load_save_stats(saved_stats)
             
-            # Charger TOUTES les stats principales pour éviter la perte lors de la mort
-            if 'health' in saved_stats:
-                game_sessions[game_id].player_stats['health'] = saved_stats['health']
-            if 'max_health' in saved_stats:
-                game_sessions[game_id].player_stats['max_health'] = saved_stats['max_health']
-            if 'mana' in saved_stats:
-                game_sessions[game_id].player_stats['mana'] = saved_stats['mana']
-            if 'max_mana' in saved_stats:
-                game_sessions[game_id].player_stats['max_mana'] = saved_stats['max_mana']
-            if 'attack' in saved_stats:
-                game_sessions[game_id].player_stats['attack'] = saved_stats['attack']
-            if 'defense' in saved_stats:
-                game_sessions[game_id].player_stats['defense'] = saved_stats['defense']
-            
-            # CORRECTION : Charger l'inventaire et l'équipement avec les bons types
+            # Gérer les cas spéciaux (rétrocompatibilité)
+            # Charger l'inventaire avec gestion des anciens formats (liste vs dict)
             saved_inventory = saved_stats.get('inventory', {})
-            match saved_inventory:
-                case dict():
-                    game_sessions[game_id].inventory = saved_inventory.copy()
-                case list():
-                    game_sessions[game_id].inventory = {}
-                    for item in saved_inventory:
-                        game_sessions[game_id].inventory[item] = game_sessions[game_id].inventory.get(item, 0) + 1
-                case _:
-                    game_sessions[game_id].inventory = {}
+            if isinstance(saved_inventory, list):
+                game_sessions[game_id].inventory = {}
+                for item in saved_inventory:
+                    game_sessions[game_id].inventory[item] = game_sessions[game_id].inventory.get(item, 0) + 1
             
+            # Charger l'équipement
             saved_equipped = saved_stats.get('equipped', {})
             if isinstance(saved_equipped, dict):
                 for slot in game_sessions[game_id].equipped:
                     game_sessions[game_id].equipped[slot] = saved_equipped.get(slot, None)
-            
-            # Charger la progression des quêtes
-            saved_quest_progress = saved_stats.get('quest_progress', {})
-            if isinstance(saved_quest_progress, dict):
-                game_sessions[game_id].quest_progress = saved_quest_progress.copy()
-            
-            saved_completed_quests = saved_stats.get('completed_quests', [])
-            if isinstance(saved_completed_quests, list):
-                game_sessions[game_id].completed_quests = saved_completed_quests.copy()
-            
-            # Charger les compétences progressives
-            saved_skills_learned = saved_stats.get('skills_learned', {})
-            if isinstance(saved_skills_learned, dict):
-                game_sessions[game_id].skills_learned = {k: v.copy() if isinstance(v, dict) else v for k, v in saved_skills_learned.items()}
-            
-            saved_unlocked_skills = saved_stats.get('unlocked_skills', {})
-            if isinstance(saved_unlocked_skills, dict):
-                game_sessions[game_id].unlocked_skills = saved_unlocked_skills.copy()
-
-            saved_runes = saved_stats.get('rune_inventory', {})
-            if isinstance(saved_runes, dict):
-                game_sessions[game_id].rune_inventory = saved_runes.copy()
-
-            game_sessions[game_id].loot_boost_count = saved_stats.get('loot_boost_count', 0)
 
             saved_cards = saved_stats.get('card_inventory', {})
             if isinstance(saved_cards, dict):
@@ -107,14 +64,34 @@ def get_game_session():
             if isinstance(saved_cards_used, list):
                 game_sessions[game_id].cards_used = saved_cards_used.copy()
 
-            # Restaurer les stats supplémentaires
+            # Restaurer les stats supplémentaires (aussi dans saved_stats maintenant)
             extra = session.get('extra_save', {})
-            if extra:
-                game_sessions[game_id].total_enemies_defeated = extra.get('total_enemies_defeated', 0)
-                game_sessions[game_id].total_damage_dealt = extra.get('total_damage_dealt', 0)
-                game_sessions[game_id].total_damage_taken = extra.get('total_damage_taken', 0)
-                game_sessions[game_id].boss_defeated = extra.get('boss_defeated', {})
-                game_sessions[game_id].difficulty = extra.get('difficulty', 'moyen')
+            game_sessions[game_id].total_enemies_defeated = saved_stats.get('total_enemies_defeated', extra.get('total_enemies_defeated', 0))
+            game_sessions[game_id].total_damage_dealt = saved_stats.get('total_damage_dealt', extra.get('total_damage_dealt', 0))
+            game_sessions[game_id].total_damage_taken = saved_stats.get('total_damage_taken', extra.get('total_damage_taken', 0))
+            game_sessions[game_id].boss_defeated = saved_stats.get('boss_defeated', extra.get('boss_defeated', {}))
+            game_sessions[game_id].difficulty = saved_stats.get('difficulty', extra.get('difficulty', 'moyen'))
+
+        # Charger les compétences sauvegardées après chaque action (clé séparée)
+        saved_skills = session.get('saved_skills')
+        if saved_skills and isinstance(saved_skills, dict):
+            saved_sl = saved_skills.get('skills_learned', {})
+            if isinstance(saved_sl, dict) and saved_sl:
+                game_sessions[game_id].skills_learned = {k: v.copy() if isinstance(v, dict) else v for k, v in saved_sl.items()}
+            saved_us = saved_skills.get('unlocked_skills', {})
+            if isinstance(saved_us, dict) and saved_us:
+                game_sessions[game_id].unlocked_skills = saved_us.copy()
+
+        # Re-débloquer les compétences progressives selon le niveau actuel
+        game_sessions[game_id].unlock_progressive_skills()
+
+    # Si le joueur a choisi une classe mais que le GameEngine n'en a pas encore,
+    # l'appliquer maintenant (cas où le GameEngine a été créé avant le choix de classe)
+    game = game_sessions[game_id]
+    if 'player_class' in session and game.player_class is None:
+        game.set_class(session['player_class'])
+        # Re-débloquer les compétences après avoir défini la classe
+        game.unlock_progressive_skills()
 
     game_sessions[game_id].language = session.get('language', 'fr')
     return game_sessions[game_id]
@@ -167,7 +144,7 @@ def index():
         'show_quests': game.show_quests,
         'show_skills': game.show_skills,
         'quests': game.get_quests_display(),
-        'completed_quests_count': len(game.completed_quests),
+        'completed_quests_count': len(game.dynamic_quests_completed),
         'player_skills': game.get_available_skills_for_level(),
         'upcoming_skills': game.get_upcoming_skills(),
         'unlocked_skills': game.unlocked_skills,
@@ -182,11 +159,28 @@ def index():
         'cards_data': game.get_cards_display(),
         'cards_used': game.cards_used,
         'score': game.get_score(),
-        'language': session.get('language', 'fr')
+        'language': session.get('language', 'fr'),
+        'dynamic_quests': game.get_dynamic_quests_display(),
+        'show_dynamic_quests': True,
+        # Système de Prestige / Arène
+        'prestige_level': game.prestige_level,
+        'reincarnation_count': game.reincarnation_count,
+        'arena_wins': game.arena_wins,
+        'arena_current_streak': game.arena_current_streak,
+        'in_arena': game.in_arena,
+        'arena_rewards': game.arena_rewards,
+        'arena_enemies_defeated': game.arena_enemies_defeated,
+        'last_arena_message': game.last_arena_message,
+        'can_reincarnate': game.player_stats.get('level', 0) >= 30,
+        'can_enter_arena': game.can_enter_arena() and game.current_location == 'arene'
     }
 
     if 'last_message' in session:
         del session['last_message']
+    
+    # Réinitialiser last_arena_message après l'avoir envoyé au template
+    # (il sera affiché une seule fois)
+    game.last_arena_message = None
 
     return render_template('game.html', game_state=game_state, t=t)
 
@@ -342,46 +336,61 @@ def action():
             message = game.use_card(action_value)
 
         case 'complete_quest':
-            if game.complete_quest(action_value):
-                quest_data = DAILY_QUESTS.get(action_value, {})
-                message = t("Quête complétée!", game.language) + f" +{quest_data.get('reward_exp', 0)} XP, +{quest_data.get('reward_gold', 0)} " + t("or", game.language)
-                if quest_data.get('reward_item'):
-                    message += f", +{quest_data.get('reward_item')}"
-            else:
+            success, message = game.complete_dynamic_quest(action_value)
+            if not success:
                 message = t("Cette quête est déjà complétée ou non accomplie.", game.language)
+        
+        # Système de Prestige / Arène
+        case 'reincarnate':
+            if game.player_stats.get('level', 0) < 30:
+                message = t("Vous devez être au moins niveau 30 pour vous réincarner !", game.language)
+            else:
+                success, message = game.reincarnate()
+                if success:
+                    # Sauvegarder les nouvelles stats après réincarnation
+                    session['saved_stats'] = game.get_save_stats()
+                    session['saved_skills'] = {
+                        'skills_learned': {k: v.copy() if isinstance(v, dict) else v for k, v in game.skills_learned.items()},
+                        'unlocked_skills': game.unlocked_skills.copy()
+                    }
+                    # Réinitialiser la session de jeu pour appliquer les changements
+                    game_id = session.get('game_id')
+                    if game_id and game_id in game_sessions:
+                        del game_sessions[game_id]
+        
+        case 'enter_arena':
+            if game.current_location != 'arene':
+                message = t("Vous devez être à l'arène pour entrer en combat !", game.language)
+            else:
+                success, message = game.enter_arena()
+                if not success:
+                    session['last_message'] = message
+        
+        case 'leave_arena':
+            message = game.leave_arena()
 
         # Cas par défaut
         case _:
             message = t("Action inconnue.", game.language)
     
     game.check_win()
-    
+
+    # Sauvegarder les compétences dans la session après chaque action
+    # pour éviter leur perte en cas de recréation du GameEngine
+    session['saved_skills'] = {
+        'skills_learned': {k: v.copy() if isinstance(v, dict) else v for k, v in game.skills_learned.items()},
+        'unlocked_skills': game.unlocked_skills.copy()
+    }
+
     # Stocker le message dans la session pour affichage
     session['last_message'] = message
-    
+
     # Sauvegarder automatiquement les stats si le joueur est mort
     if game.game_over:
-        session['saved_stats'] = {
-            'exp': game.player_stats['exp'],
-            'level': game.player_stats['level'],
-            'gold': game.player_stats['gold'],
-            'exp_for_next_level': game.player_stats['exp_for_next_level'],
-            'inventory': game.inventory.copy(),
-            'equipped': game.equipped.copy(),
-            'health': game.player_stats['health'],
-            'max_health': game.player_stats['max_health'],
-            'mana': game.player_stats['mana'],
-            'max_mana': game.player_stats['max_mana'],
-            'attack': game.player_stats['attack'],
-            'defense': game.player_stats['defense'],
-            'quest_progress': game.quest_progress.copy(),
-            'completed_quests': game.completed_quests.copy(),
+        session['saved_stats'] = game.get_save_stats()
+        session['saved_skills'] = {
             'skills_learned': {k: v.copy() if isinstance(v, dict) else v for k, v in game.skills_learned.items()},
-            'unlocked_skills': game.unlocked_skills.copy(),
-            'rune_inventory': game.rune_inventory.copy(),
-            'loot_boost_count': game.loot_boost_count,
-            'card_inventory': game.card_inventory.copy(),
-            'cards_used': game.cards_used.copy()
+            'unlocked_skills': game.unlocked_skills.copy()
         }
         session.modified = True
         # Supprimer la session de jeu actuelle pour forcer un rechargement
@@ -404,27 +413,12 @@ def restart():
     game = get_game_session()
     
     # Sauvegarder TOUTES les stats actuelles dans la session
-    session['saved_stats'] = {
-        'exp': game.player_stats['exp'],
-        'level': game.player_stats['level'],
-        'gold': game.player_stats['gold'],
-        'exp_for_next_level': game.player_stats['exp_for_next_level'],
-        'inventory': game.inventory.copy(),
-        'equipped': game.equipped.copy(),
-        'health': game.player_stats['health'],
-        'max_health': game.player_stats['max_health'],
-        'mana': game.player_stats['mana'],
-        'max_mana': game.player_stats['max_mana'],
-        'attack': game.player_stats['attack'],
-        'defense': game.player_stats['defense'],
-        'quest_progress': game.quest_progress.copy(),
-        'completed_quests': game.completed_quests.copy(),
+    session['saved_stats'] = game.get_save_stats()
+    
+    # Mettre aussi à jour saved_skills pour cohérence
+    session['saved_skills'] = {
         'skills_learned': {k: v.copy() if isinstance(v, dict) else v for k, v in game.skills_learned.items()},
-        'unlocked_skills': game.unlocked_skills.copy(),
-        'rune_inventory': game.rune_inventory.copy(),
-        'loot_boost_count': game.loot_boost_count,
-        'card_inventory': game.card_inventory.copy(),
-        'cards_used': game.cards_used.copy()
+        'unlocked_skills': game.unlocked_skills.copy()
     }
 
     game_id = session.get('game_id')
@@ -437,6 +431,26 @@ def restart():
     session['game_id'] = os.urandom(16).hex()
     session.modified = True
     
+    return redirect(url_for('index'))
+
+
+@app.route('/reset-dynamic-quests', methods=['POST'])
+def reset_dynamic_quests():
+    """Reset manuellement les quêtes dynamiques"""
+    game = get_game_session()
+    result = game.reset_dynamic_quests()
+    session['last_message'] = result
+    session.modified = True
+    return redirect(url_for('index'))
+
+
+@app.route('/complete-dynamic-quest/<quest_id>', methods=['POST'])
+def complete_dynamic_quest(quest_id):
+    """Complète une quête dynamique"""
+    game = get_game_session()
+    success, message = game.complete_dynamic_quest(quest_id)
+    session['last_message'] = message
+    session.modified = True
     return redirect(url_for('index'))
 
 
@@ -461,8 +475,8 @@ def save_game():
         },
         "inventory": game.inventory.copy(),
         "equipped": game.equipped.copy(),
-        "quest_progress": game.quest_progress.copy(),
-        "completed_quests": game.completed_quests.copy(),
+        "dynamic_quest_progress": game.dynamic_quest_progress.copy(),
+        "dynamic_quests_completed": game.dynamic_quests_completed.copy(),
         "skills_learned": {k: v.copy() if isinstance(v, dict) else v for k, v in game.skills_learned.items()},
         "unlocked_skills": game.unlocked_skills.copy(),
         "rune_inventory": game.rune_inventory.copy(),
@@ -473,7 +487,19 @@ def save_game():
         "total_damage_dealt": game.total_damage_dealt,
         "total_damage_taken": game.total_damage_taken,
         "boss_defeated": game.boss_defeated.copy(),
-        "difficulty": game.difficulty
+        "difficulty": game.difficulty,
+        # Système de Prestige / Réincarnation
+        "prestige_level": game.prestige_level,
+        "reincarnation_count": game.reincarnation_count,
+        # Système d'Arène
+        "in_arena": game.in_arena,
+        "arena_wins": game.arena_wins,
+        "arena_current_streak": game.arena_current_streak,
+        "arena_enemies_defeated": game.arena_enemies_defeated,
+        "arena_rewards": game.arena_rewards.copy(),
+        # Position
+        "current_location": game.current_location,
+        "visited_locations": list(game.visited_locations) if hasattr(game, 'visited_locations') else []
     }
     json_str = json.dumps(save_data, ensure_ascii=False, indent=2)
     return send_file(
@@ -521,14 +547,27 @@ def load_game():
         'defense': save_data.get('player_stats', {}).get('defense', 0),
         'inventory': save_data.get('inventory', {}),
         'equipped': save_data.get('equipped', {}),
-        'quest_progress': save_data.get('quest_progress', {}),
-        'completed_quests': save_data.get('completed_quests', []),
+        'dynamic_quest_progress': save_data.get('dynamic_quest_progress', {}),
+        'dynamic_quests_completed': save_data.get('dynamic_quests_completed', []),
         'skills_learned': save_data.get('skills_learned', {}),
         'unlocked_skills': save_data.get('unlocked_skills', {}),
         'rune_inventory': save_data.get('rune_inventory', {}),
         'loot_boost_count': save_data.get('loot_boost_count', 0),
         'card_inventory': save_data.get('card_inventory', {}),
-        'cards_used': save_data.get('cards_used', [])
+        'cards_used': save_data.get('cards_used', []),
+        'prestige_level': save_data.get('prestige_level', 0),
+        'reincarnation_count': save_data.get('reincarnation_count', 0),
+        'arena_rewards': save_data.get('arena_rewards', {"exp": 0, "gold": 0, "runes": {}, "cards": {}}),
+        'in_arena': save_data.get('in_arena', False),
+        'arena_wins': save_data.get('arena_wins', 0),
+        'arena_current_streak': save_data.get('arena_current_streak', 0),
+        'arena_enemies_defeated': save_data.get('arena_enemies_defeated', 0),
+        'current_location': save_data.get('current_location', GAME_CONFIG.get('starting_location', 'forest')),
+        'visited_locations': list(set(save_data.get('visited_locations', [GAME_CONFIG.get('starting_location', 'forest')]))),
+        'total_enemies_defeated': save_data.get('total_enemies_defeated', 0),
+        'total_damage_dealt': save_data.get('total_damage_dealt', 0),
+        'total_damage_taken': save_data.get('total_damage_taken', 0),
+        'difficulty': save_data.get('difficulty', 'moyen')
     }
 
     # Supprimer l'ancienne session de jeu pour forcer le rechargement
@@ -536,7 +575,13 @@ def load_game():
     if game_id and game_id in game_sessions:
         del game_sessions[game_id]
 
-    # Restaurer les stats de jeu supplémentaires
+    # Mettre à jour saved_skills pour cohérence
+    session['saved_skills'] = {
+        'skills_learned': save_data.get('skills_learned', {}),
+        'unlocked_skills': save_data.get('unlocked_skills', {})
+    }
+
+    # Restaurer les stats de jeu supplémentaires (pour rétrocompatibilité)
     session['extra_save'] = {
         'total_enemies_defeated': save_data.get('total_enemies_defeated', 0),
         'total_damage_dealt': save_data.get('total_damage_dealt', 0),

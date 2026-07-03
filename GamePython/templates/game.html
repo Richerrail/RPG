@@ -818,6 +818,12 @@
                 <div class="stat-item"><span class="stat-label">{{ t("Arme:", game_state.language) }}</span><span class="stat-value">{{ game_state.player_stats.weapon }}</span></div>
                 <div class="stat-item"><span class="stat-label">{{ t("Armure:", game_state.language) }}</span><span class="stat-value">{{ game_state.player_stats.armor }}</span></div>
                 <div class="stat-item"><span class="stat-label">{{ t("Difficulte:", game_state.language) }}</span><span class="stat-value">{{ game_state.difficulty | upper }}</span></div>
+                {% if game_state.prestige_level > 0 %}
+                <div class="stat-item"><span class="stat-label">{{ t("Prestige:", game_state.language) }}</span><span class="stat-value" style="color: #ff88ff; font-weight: bold;">⭐{{ game_state.prestige_level }}</span></div>
+                {% endif %}
+                {% if game_state.arena_wins > 0 %}
+                <div class="stat-item"><span class="stat-label">{{ t("Victoires en arène:", game_state.language) }}</span><span class="stat-value" style="color: #ff4444;">{{ game_state.arena_wins }}</span></div>
+                {% endif %}
                 {% if game_state.loot_boost_info.count > 0 %}
                 <div class="stat-item">
                     <span class="stat-label">{{ t("Chance loot:", game_state.language) }}</span>
@@ -989,6 +995,9 @@
                 {% if game_state.last_message %}
                     <div class="message" id="combat-message">{{ game_state.last_message | safe }}</div>
                 {% endif %}
+                {% if game_state.last_arena_message %}
+                    <div class="message" id="arena-message" style="background: linear-gradient(135deg, #8B0000 0%, #4B0082 100%); border: 2px solid #FFD700; border-radius: 8px; padding: 15px; margin: 10px 0; color: #FFD700; text-shadow: 1px 1px 2px #000;">{{ game_state.last_arena_message | safe }}</div>
+                {% endif %}
 
                 {% if game_state.current_shop %}
                     <div class="shop-section">
@@ -1015,7 +1024,7 @@
                     </div>
                 {% endif %}
 
-            <div class="actions">
+            <div class="actions" id="actions-container">
                 {% if game_state.in_combat %}
                     <form method="post" action="/action">
                         <input type="hidden" name="action_type" value="attack">
@@ -1151,6 +1160,31 @@
                     <input type="hidden" name="action_type" value="toggle_runes">
                     <button type="submit" class="action-btn" style="background: #ff6644; border-color: #ff8866; color: #fff;">⚒️ {{ t("RUNES", game_state.language) }} {% if game_state.runes_data.inventory|length > 0 %}({{ game_state.runes_data.inventory|length }}){% endif %}</button>
                 </form>
+                
+                {# Bouton Réincarner (Prestige) #}
+                {% if game_state.can_reincarnate %}
+                <form method="post" action="/action" style="margin-top: 5px;">
+                    <input type="hidden" name="action_type" value="reincarnate">
+                    <button type="submit" class="action-btn" style="background: #ff44ff; border-color: #ff88ff; color: #fff; font-weight: bold;" onmouseover="this.style.boxShadow='0 0 15px #ff44ff'" onmouseout="this.style.boxShadow='none'">🔄 {{ t("Réincarner", game_state.language) }} (Prestige {{ game_state.prestige_level }})</button>
+                </form>
+                {% endif %}
+                
+                {# Bouton Entrer dans l'Arène #}
+                {% if game_state.can_enter_arena %}
+                <form method="post" action="/action" style="margin-top: 5px;">
+                    <input type="hidden" name="action_type" value="enter_arena">
+                    <button type="submit" class="action-btn" style="background: #ff2200; border-color: #ff6644; color: #fff; font-weight: bold;" onmouseover="this.style.boxShadow='0 0 15px #ff2200'" onmouseout="this.style.boxShadow='none'">⚔️ {{ t("Entrer dans l'Arène", game_state.language) }}</button>
+                </form>
+                {% endif %}
+                
+                {# Bouton Quitter l'Arène (visible uniquement en arène) #}
+                {% if game_state.in_arena %}
+                <form method="post" action="/action" style="margin-top: 5px;">
+                    <input type="hidden" name="action_type" value="leave_arena">
+                    <button type="submit" class="action-btn" style="background: #884400; border-color: #aa6644; color: #fff;">🚪 {{ t("Quitter l'Arène", game_state.language) }}</button>
+                </form>
+                {% endif %}
+                
                 <div style="margin-top: 15px; display: flex; gap: 8px;">
                     <a href="/save" style="flex: 1; text-decoration: none;">
                         <button type="button" class="action-btn" style="background: #2266cc; border-color: #4488ff; color: #fff; width: 100%;">💾 {{ t("SAUVEGARDER", game_state.language) }}</button>
@@ -1327,7 +1361,7 @@
     <div class="modal-overlay" onclick="closeQuests()">
         <div class="modal-content" style="width: 90%; max-width: 700px; background: linear-gradient(135deg, #2a1a1a 0%, #3d1f1f 100%); border-color: #ffaa00;" onclick="event.stopPropagation()">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                <h2 style="color: #ffaa00; margin: 0; font-size: 24px;">📜 {{ t("QUÊTES QUOTIDIENNES", game_state.language) }}</h2>
+                <h2 style="color: #ffaa00; margin: 0; font-size: 24px;">📜 {{ t("QUÊTES", game_state.language) }}</h2>
                 <form method="post" action="/action" style="margin: 0;">
                     <input type="hidden" name="action_type" value="toggle_quests">
                     <button type="submit" style="background: #ff4444; color: white; border: none; padding: 5px 15px; border-radius: 5px; cursor: pointer; font-size: 16px;">✕</button>
@@ -1353,7 +1387,7 @@
                             {% elif quest.progress >= quest.target %}
                                 <form method="post" action="/action" style="margin-left: 10px;">
                                     <input type="hidden" name="action_type" value="complete_quest">
-                                    <input type="hidden" name="action_value" value="{{ quest.name }}">
+                                    <input type="hidden" name="action_value" value="{{ quest.id }}">
                                     <button type="submit" style="background: #00ff88; color: #000; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-weight: bold;">{{ t("Compléter", game_state.language) }}</button>
                                 </form>
                             {% endif %}
@@ -1597,5 +1631,33 @@
         });
     </script>
     {% endif %}
+
+    <!-- Auto-scroll vers les boutons pendant les combats -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Vérifie si on est en combat en utilisant la variable passée depuis Flask
+            const isInCombat = {{ game_state.in_combat | lower }};
+            
+            if (isInCombat) {
+                // Petit délai pour s'assurer que tout est chargé
+                setTimeout(function() {
+                    const combatants = document.querySelector('.combatants');
+                    if (combatants) {
+                        // Scroll pour centrer sur les fenêtres du joueur et de l'ennemi
+                        combatants.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'center'
+                        });
+                    } else {
+                        // Fallback : scroll vers le bas de la page
+                        window.scrollTo({
+                            top: document.body.scrollHeight,
+                            behavior: 'smooth'
+                        });
+                    }
+                }, 100);
+            }
+        });
+    </script>
 </body>
 </html>

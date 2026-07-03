@@ -72,7 +72,7 @@ CLASSES = {
             "max_mana": 60
         },
         "bonus": "+1 Attack, +0.5% Crit, +1% Loot par niveau",
-        "skill": "Coup de Chance - 1.5x dégâts, boost loot si kill"
+        "skill": "Coup de Chance - 1.5x dégâts, si l'ennemi meurt : qualité de loot +20% et chance de loot doublée pour ce kill"
     }
 }
 
@@ -131,7 +131,7 @@ SKILLS = {
     },
     "Pilleur": {
         "Coup de Chance": {
-            "description": "Attaque chanceuse (1.5x). Si l'ennemi meurt, loot boosté !",
+            "description": "Attaque chanceuse (1.5x dégâts). Si elle tue l'ennemi : qualité de loot +20% (passif Pilleur déjà inclus) + chance de loot doublée pour ce kill. Parfait pour farmer les meilleurs items !",
             "mana_cost": 15,
             "damage_multiplier": 1.5,
             "icon": "🍀",
@@ -283,74 +283,125 @@ PROGRESSIVE_SKILLS = {
             "icon": "⚡"
         },
         {
-            "name": "Dévaliser",
+            "name": "Pacte Doré",
             "level": 12,
-            "description": "Critique garanti 3x dégâts + loot automatique de rareté épique",
-            "mana_cost": 45,
-            "damage_multiplier": 3.0,
-            "guaranteed_crit": True,
-            "guaranteed_loot_rarity": "epique",
-            "icon": "🏴‍☠️"
+            "description": "Sacrifie 30% HP. Dégâts basés sur le sacrifice. Loot garanti selon HP restant (légendaire si <20%)",
+            "mana_cost": 50,
+            "hp_cost_percent": 0.30,
+            "damage_per_hp_lost": 3.0,
+            "buff_name": "Fièvre de l'Or",
+            "buff_duration": 3,
+            "buff_crit_bonus": 0.15,
+            "buff_loot_bonus": 0.25,
+            "icon": "🩸💰"
         }
     ]
 }
 
 
-# Systeme de quetes quotidiennes
-DAILY_QUESTS = {
-    "Tueur de Gobelins": {
-        "description": "Vaincre 5 Goblins",
-        "target_enemy": "Goblin",
-        "target_count": 5,
-        "reward_exp": 500,
-        "reward_gold": 100,
-        "reward_item": None,
-        "icon": "🐢"
+# ============ SYSTÈME DE QUÊTES DYNAMIQUES ============
+# ============ SYSTÈME DE QUÊTES DYNAMIQUES ============
+# Quêtes qui s'adaptent au niveau du joueur et peuvent être reset
+# Formules: {base} + {multiplier} * player_level
+DYNAMIC_QUEST_TEMPLATES = {
+    # Quêtes de combat
+    "Tueur d'Ennemis": {
+        "type": "kill_enemies",
+        "target_count_formula": lambda level: max(5, int(3 + level * 0.8)),  # 5-20 ennemis
+        "reward_exp_formula": lambda level: int(15 + level * 3),  # ~15-45 XP (10-20% du niveau)
+        "reward_gold_formula": lambda level: int(20 + level * 5),  # ~25-70 or
+        "reward_item_formula": None,
+        "description_template": "Vaincre {count} ennemis",
+        "icon": "⚔️"
     },
-    "Chasseur de Loups": {
-        "description": "Vaincre 3 Loups",
-        "target_enemy": "Loup",
-        "target_count": 3,
-        "reward_exp": 400,
-        "reward_gold": 80,
-        "reward_item": None,
-        "icon": "🐺"
-    },
-    "Tueur d'Orcs": {
-        "description": "Vaincre 4 Orcs",
-        "target_enemy": "Orc",
-        "target_count": 4,
-        "reward_exp": 600,
-        "reward_gold": 120,
-        "reward_item": None,
+    "Chasseur de Boss": {
+        "type": "kill_bosses",
+        "target_count_formula": lambda level: max(1, int(level // 10)),  # 1 boss tous les 10 niveaux
+        "reward_exp_formula": lambda level: int(40 + level * 8),  # ~40-100 XP (20-30% du niveau)
+        "reward_gold_formula": lambda level: int(50 + level * 10),  # ~60-130 or
+        "reward_item_formula": lambda level: "Potion Santé Majeure" if level >= 10 else "Potion Santé",
+        "description_template": "Vaincre {count} boss",
         "icon": "👹"
     },
-    "Collectionneur de Pièces": {
-        "description": "Amasser 500 or",
-        "type": "gold",
-        "target_gold": 500,
-        "reward_exp": 300,
-        "reward_gold": 50,
-        "reward_item": "Potion Santé Majeure",
+    
+    # Quêtes d'exploration
+    "Explorateur": {
+        "type": "explore",
+        "target_count_formula": lambda level: max(3, int(2 + level * 0.5)),  # 3-10 explorations
+        "reward_exp_formula": lambda level: int(12 + level * 2.5),  # ~12-35 XP
+        "reward_gold_formula": lambda level: int(15 + level * 4),  # ~15-50 or
+        "reward_item_formula": None,
+        "description_template": "Explorer {count} zones",
+        "icon": "🗺️"
+    },
+    "Collectionneur": {
+        "type": "collect_gold",
+        "target_count_formula": lambda level: max(200, int(100 + level * 50)),  # 250-1200 or
+        "reward_exp_formula": lambda level: int(20 + level * 4),  # ~20-50 XP
+        "reward_gold_formula": lambda level: int(10 + level * 2),  # ~10-30 or (bonus)
+        "reward_item_formula": None,
+        "description_template": "Amasser {count} pièces d'or",
         "icon": "💰"
     },
-    "Aventurier Expérimenté": {
-        "description": "Gagner 1000 XP",
-        "type": "exp",
-        "target_exp": 1000,
-        "reward_exp": 500,
-        "reward_gold": 200,
-        "reward_item": None,
+    
+    # Quêtes de progression
+    "Montee en Puissance": {
+        "type": "gain_xp",
+        "target_count_formula": lambda level: max(200, int(100 + level * 20)),  # 200-500 XP à gagner
+        "reward_exp_formula": lambda level: int(25 + level * 5),  # ~25-65 XP (10-15% du niveau)
+        "reward_gold_formula": lambda level: int(20 + level * 5),  # ~20-70 or
+        "reward_item_formula": None,
+        "description_template": "Gagner {count} points d'experience",
         "icon": "⭐"
     },
-    "Chasseur de Dragons": {
-        "description": "Vaincre 2 Dragons",
-        "target_enemy": "Dragon",
-        "target_count": 2,
-        "reward_exp": 1000,
-        "reward_gold": 300,
-        "reward_item": "Potion Protection",
-        "icon": "🐉"
+    "Maitre des Competences": {
+        "type": "use_skills",
+        "target_count_formula": lambda level: max(5, int(3 + level * 0.7)),  # 5-15 competences
+        "reward_exp_formula": lambda level: int(10 + level * 2),  # ~10-30 XP
+        "reward_gold_formula": lambda level: int(15 + level * 3),  # ~15-45 or
+        "reward_item_formula": None,
+        "description_template": "Utiliser {count} competences en combat",
+        "icon": "✨"
+    },
+    
+    # Quêtes sociales
+    "Marchand Avise": {
+        "type": "buy_items",
+        "target_count_formula": lambda level: max(2, int(1 + level * 0.3)),  # 2-8 achats
+        "reward_exp_formula": lambda level: int(10 + level * 2),  # ~10-30 XP
+        "reward_gold_formula": lambda level: int(10 + level * 3),  # ~10-40 or
+        "reward_item_formula": None,
+        "description_template": "Acheter {count} objets dans les magasins",
+        "icon": "🛒"
+    },
+    "Nettoyeur d'Inventaire": {
+        "type": "use_items",
+        "target_count_formula": lambda level: max(3, int(2 + level * 0.4)),  # 3-8 objets
+        "reward_exp_formula": lambda level: int(8 + level * 1.5),  # ~8-20 XP
+        "reward_gold_formula": lambda level: int(10 + level * 2),  # ~10-30 or
+        "reward_item_formula": None,
+        "description_template": "Utiliser {count} objets consommables",
+        "icon": "🧴"
+    }
+}
+
+# Configuration des quêtes dynamiques
+DYNAMIC_QUESTS_CONFIG = {
+    "reset_type": "weekly",  # "daily", "weekly", ou "manual"
+    "max_active_quests": 3,    # Nombre de quêtes dynamiques actives à la fois
+    "quest_selection": "random",  # "random" ou "level_based"
+    "cooldown_hours": 168,    # 168h = 7 jours pour un reset hebdomadaire
+    "min_level_for_reset": 5,  # Niveau minimum pour avoir des quêtes dynamiques
+    # Poids pour la sélection aléatoire (plus de quêtes de combat)
+    "template_weights": {
+        "Tueur d'Ennemis": 25,
+        "Chasseur de Boss": 10,
+        "Explorateur": 20,
+        "Collectionneur": 15,
+        "Montee en Puissance": 10,
+        "Maitre des Competences": 10,
+        "Marchand Avise": 5,
+        "Nettoyeur d'Inventaire": 5
     }
 }
 
@@ -1737,9 +1788,10 @@ LOCATIONS = {
         "name": "Foret Sombre",
         "description": "Vous entrez dans une foret dense et mystérieuse. Les arbres sont énormes et la lumière filtre a peine.",
         "enemies": ["Goblin", "Goblin", "Loup", "Loup"],
-        "npcs": ["Marchand de potions"],
+        "npcs": ["Marchand de potions", "Gardien de l'Arène"],
         "exits": {
             "nord": "village",
+            "nord-est": "arene",
             "est": "cave",
             "ouest": "river",
             "nord-ouest": "mountain",
@@ -1753,14 +1805,28 @@ LOCATIONS = {
         "name": "Village Paisible",
         "description": "Un petit village avec quelques maisons en bois. Les habitants vous regardent avec curiosité.",
         "enemies": [],
-        "npcs": ["Aubergiste", "Forgeron", "Colporteur Mystique"],
+        "npcs": ["Aubergiste", "Forgeron", "Colporteur Mystique", "Gardien de l'Arène"],
         "exits": {
             "sud": "forest",
             "est": "temple",
-            "ouest": "castle"
+            "ouest": "castle",
+            "nord": "arene"
         },
         "x": 50,
         "y": 40
+    },
+    "arene": {
+        "name": "Arène de Combat à Mort",
+        "description": "Une arène antique où les guerriers les plus valeureux s'affrontent jusqu'à la mort. Seul ceux qui ont prouvé leur valeur peuvent y entrer. Les murs sont couverts du sang des combattants passés.",
+        "enemies": [],
+        "npcs": ["Gardien de l'Arène"],
+        "exits": {
+            "sud": "village"
+        },
+        "x": 50,
+        "y": 20,
+        "is_arena": True,
+        "requirement": "prestige_1"
     },
     "cave": {
         "name": "Caverne Ancienne",
@@ -1993,12 +2059,269 @@ LOCATIONS = {
         "npcs": [],
         "exits": {
             "sud": "star_lake",
-            "ouest": "crystal_fields"
+            "ouest": "crystal_fields",
+            "nord": "abyssal_ruins"
         },
         "x": 55,
         "y": 70
+    },
+    "abyssal_ruins": {
+        "name": "Ruines Abyssales",
+        "description": "Des ruines anciennes corrodées par les énergies démoniaques. Des ombres dansantes semblent habiter chaque pierre. L'air est lourd de malédictions.",
+        "enemies": ["Démon Cornu", "Succube", "Bête des Abysses"],
+        "npcs": [],
+        "exits": {
+            "sud": "void_sanctum",
+            "est": "soul_prison"
+        },
+        "x": 55,
+        "y": 55
+    },
+    "soul_prison": {
+        "name": "Prison des Âmes",
+        "description": "Une prison dimensionnelle où les âmes des damnés sont emprisonnées pour l'éternité. Les murs résonnent de cris étouffés. Une énergie négative intense pèse sur vous.",
+        "enemies": ["Seigneur Démoniaque", "Âme Tourmentée", "Bête des Abysses"],
+        "npcs": [],
+        "exits": {
+            "ouest": "abyssal_ruins",
+            "nord": "demon_forge"
+        },
+        "x": 75,
+        "y": 55
+    },
+    "demon_forge": {
+        "name": "Forge Démoniaque",
+        "description": "Une forge infernale où les démons forgent des armes de destruction. La chaleur est intenable et des étincelles de feu noir volent partout.",
+        "enemies": ["Forgeron Démoniaque", "Incube", "Démon Cornu"],
+        "npcs": [],
+        "exits": {
+            "sud": "soul_prison",
+            "ouest": "star_lake",
+            "nord": "temple_of_the_damned"
+        },
+        "x": 75,
+        "y": 85
+    },
+    "temple_of_the_damned": {
+        "name": "Temple des Damnés",
+        "description": "Un temple maudit dédié aux seigneurs démons. Les piliers sont sculptés dans des os géants et des sacrifices sanglants ont lieu ici depuis des millénaires. L'air empeste la mort et la corruption.",
+        "enemies": ["Grand Inquisiteur", "Démon de Sang", "Gardien des Ténèbres"],
+        "npcs": [],
+        "exits": {
+            "sud": "demon_forge",
+            "est": "heart_of_the_abyss"
+        },
+        "x": 75,
+        "y": 30
+    },
+    "heart_of_the_abyss": {
+        "name": "Cœur des Abysses",
+        "description": "Le centre névralgique des enfers. Un cristal noir géant pulse avec une énergie maléfique, alimentant toute la dimension démoniaque. La température oscille entre brûlant et glacé.",
+        "enemies": ["Archidémon", "Djinn Maléfique", "Gardien des Ténèbres"],
+        "npcs": [],
+        "exits": {
+            "ouest": "temple_of_the_damned",
+            "nord": "throne_of_satan"
+        },
+        "x": 95,
+        "y": 30
+    },
+    "throne_of_satan": {
+        "name": "Trône de Satan",
+        "description": "La salle du trône du seigneur des enfers lui-même. Des statues démoniaques géantes bordent le chemin vers un trône de crânes et d'os noirs. Une présence terrifiante vous observe.",
+        "enemies": ["Seigneur Abyssal", "Diable Majeur", "Archidémon", "Démon Suprême"],
+        "npcs": [],
+        "exits": {
+            "sud": "heart_of_the_abyss"
+        },
+        "x": 95,
+        "y": 10
     }
 }
+
+# ============ ITEMS SPÉCIFIQUES DES BOSS ============
+# Items uniques ou rares obtenus uniquement en vainquant des boss
+ITEMS.update({
+    "Écailles de Dragon Glacé": {
+        "type": "crafting",
+        "rarity": "epique",
+        "required_level": 20,
+        "price": 300,
+        "description": "Écailles de dragon de glace, utilisées pour forger des armures résistantes au froid"
+    },
+    "Venin de Hydre": {
+        "type": "crafting",
+        "rarity": "rare",
+        "required_level": 18,
+        "price": 250,
+        "description": "Venin mortel extrait d'une hydre, utilisé pour empoisonner les armes"
+    },
+    "Fragment de Diamant": {
+        "type": "crafting",
+        "rarity": "epique",
+        "required_level": 20,
+        "price": 400,
+        "description": "Fragment de diamant pur, très recherché par les forgerons"
+    },
+    "Dent de Vampire": {
+        "type": "crafting",
+        "rarity": "rare",
+        "required_level": 15,
+        "price": 200,
+        "description": "Dent de vampire ancestral, contient des pouvoirs sombres"
+    },
+    "Corne de Minotaure": {
+        "type": "crafting",
+        "rarity": "epique",
+        "required_level": 22,
+        "price": 350,
+        "description": "Corne puissante du minotaure du labyrinthe"
+    },
+    "Plume de Phénix": {
+        "type": "crafting",
+        "rarity": "legendaire",
+        "required_level": 25,
+        "price": 500,
+        "description": "Plume rare d'un phénix, permet de créer des objets de résurrection"
+    },
+    "Cœur de Démon": {
+        "type": "crafting",
+        "rarity": "legendaire",
+        "required_level": 28,
+        "price": 600,
+        "description": "Cœur palpitant d'un démon suprême, source de pouvoir corrompu"
+    },
+    "Âme Corrompue": {
+        "type": "crafting",
+        "rarity": "legendaire",
+        "required_level": 25,
+        "price": 550,
+        "description": "Âme corrompue par les forces obscures, utilisée dans les rituels interdits"
+    },
+    "Poussière de Fée": {
+        "type": "crafting",
+        "rarity": "epique",
+        "required_level": 20,
+        "price": 300,
+        "description": "Poussière magique des ailes de fée, utilisée pour les potions de vol"
+    },
+    "Os Maudit": {
+        "type": "crafting",
+        "rarity": "rare",
+        "required_level": 22,
+        "price": 220,
+        "description": "Os imprégné de magie nécromantique, utilisé pour invoquer des morts-vivants"
+    },
+    "Épée Sombre": {
+        "type": "weapon",
+        "attack_bonus": 14,
+        "class": None,
+        "rarity": "epique",
+        "required_level": 18,
+        "price": 350,
+        "description": "Épée forgée dans les ombres, absorbe la vie des ennemis"
+    },
+    "Armure Abyssale": {
+        "type": "armor",
+        "defense_bonus": 14,
+        "rarity": "epique",
+        "required_level": 20,
+        "price": 400,
+        "description": "Armure forgée dans les abysses, résistante à la magie"
+    },
+    "Lame du Néant": {
+        "type": "weapon",
+        "attack_bonus": 18,
+        "class": None,
+        "rarity": "legendaire",
+        "required_level": 25,
+        "price": 1000,
+        "description": "Lame légendaire qui tranche à travers le néant lui-même"
+    },
+    "Cape des Ombres": {
+        "type": "accessory",
+        "defense_bonus": 8,
+        "rarity": "epique",
+        "required_level": 18,
+        "price": 300,
+        "description": "Cape qui permet de se fondre dans l'ombre"
+    },
+    "Anneau de Vitalité": {
+        "type": "accessory",
+        "health_bonus": 50,
+        "rarity": "rare",
+        "required_level": 15,
+        "price": 250,
+        "description": "Anneau qui renforce la vitalité du porteur"
+    },
+    "Dragon Blanc": {
+        "type": "weapon",
+        "attack_bonus": 20,
+        "class": None,
+        "rarity": "legendaire",
+        "required_level": 30,
+        "price": 1500,
+        "description": "Arme légendaire forgée à partir des os d'un dragon blanc"
+    },
+    "Bâton de Merlin": {
+        "type": "weapon",
+        "attack_bonus": 12,
+        "mana_bonus": 80,
+        "class": "Mage",
+        "rarity": "legendaire",
+        "required_level": 25,
+        "price": 1200,
+        "description": "Bâton magique utilisé par Merlin lui-même"
+    },
+    "Gungnir, Lance d'Odin": {
+        "type": "weapon",
+        "attack_bonus": 22,
+        "class": None,
+        "rarity": "legendaire",
+        "required_level": 25,
+        "price": 1500,
+        "description": "Lance légendaire du dieu Odin, ne rate jamais sa cible"
+    },
+    "Mjolnir": {
+        "type": "weapon",
+        "attack_bonus": 20,
+        "class": "Guerrier",
+        "rarity": "legendaire",
+        "required_level": 25,
+        "price": 1400,
+        "description": "Marteau du dieu Thor, inflige des dégâts foudre"
+    },
+    "Bâton des Abysses": {
+        "type": "weapon",
+        "attack_bonus": 15,
+        "mana_bonus": 90,
+        "class": "Mage",
+        "rarity": "legendaire",
+        "required_level": 28,
+        "price": 1300,
+        "description": "Bâton imprégné des pouvoirs des abysses"
+    },
+    "Excalibur": {
+        "type": "weapon",
+        "attack_bonus": 25,
+        "class": None,
+        "rarity": "legendaire",
+        "required_level": 30,
+        "price": 2000,
+        "description": "L'épée légendaire du Roi Arthur, symbol de pureté et de puissance"
+    },
+    "Anneau Infini": {
+        "type": "accessory",
+        "attack_bonus": 10,
+        "defense_bonus": 10,
+        "health_bonus": 50,
+        "mana_bonus": 50,
+        "rarity": "legendaire",
+        "required_level": 30,
+        "price": 2000,
+        "description": "Anneau mythique qui améliore toutes les stats"
+    }
+})
 
 # Enemis
 ENEMIES = {
@@ -2308,6 +2631,128 @@ ENEMIES = {
         "level": 25,
         "exp_reward": 900,
         "gold_reward": 350
+    },
+    # ===== Nouveaux monstres de la zone démoniaque =====
+    "Démon Cornu": {
+        "health": 300,
+        "attack": 45,
+        "defense": 18,
+        "level": 28,
+        "exp_reward": 800,
+        "gold_reward": 220
+    },
+    "Succube": {
+        "health": 250,
+        "attack": 50,
+        "defense": 12,
+        "level": 30,
+        "exp_reward": 850,
+        "gold_reward": 250
+    },
+    "Incube": {
+        "health": 280,
+        "attack": 52,
+        "defense": 14,
+        "level": 30,
+        "exp_reward": 900,
+        "gold_reward": 270
+    },
+    "Seigneur Démoniaque": {
+        "health": 500,
+        "attack": 65,
+        "defense": 25,
+        "level": 32,
+        "exp_reward": 1200,
+        "gold_reward": 400
+    },
+    "Âme Tourmentée": {
+        "health": 320,
+        "attack": 40,
+        "defense": 10,
+        "level": 26,
+        "exp_reward": 700,
+        "gold_reward": 180
+    },
+    "Forgeron Démoniaque": {
+        "health": 420,
+        "attack": 58,
+        "defense": 22,
+        "level": 30,
+        "exp_reward": 1000,
+        "gold_reward": 300
+    },
+    "Bête des Abysses": {
+        "health": 350,
+        "attack": 48,
+        "defense": 16,
+        "level": 27,
+        "exp_reward": 750,
+        "gold_reward": 200
+    },
+    # ===== Monstres de niveau 40+ (Zone Abyssale Profonde) =====
+    "Grand Inquisiteur": {
+        "health": 600,
+        "attack": 75,
+        "defense": 30,
+        "level": 40,
+        "exp_reward": 1500,
+        "gold_reward": 500
+    },
+    "Démon de Sang": {
+        "health": 550,
+        "attack": 72,
+        "defense": 25,
+        "level": 42,
+        "exp_reward": 1600,
+        "gold_reward": 450
+    },
+    "Gardien des Ténèbres": {
+        "health": 700,
+        "attack": 68,
+        "defense": 35,
+        "level": 41,
+        "exp_reward": 1700,
+        "gold_reward": 550
+    },
+    "Archidémon": {
+        "health": 800,
+        "attack": 85,
+        "defense": 30,
+        "level": 45,
+        "exp_reward": 2000,
+        "gold_reward": 600
+    },
+    "Djinn Maléfique": {
+        "health": 650,
+        "attack": 80,
+        "defense": 25,
+        "level": 43,
+        "exp_reward": 1800,
+        "gold_reward": 500
+    },
+    "Seigneur Abyssal": {
+        "health": 900,
+        "attack": 90,
+        "defense": 40,
+        "level": 48,
+        "exp_reward": 2500,
+        "gold_reward": 800
+    },
+    "Diable Majeur": {
+        "health": 1000,
+        "attack": 95,
+        "defense": 35,
+        "level": 47,
+        "exp_reward": 2400,
+        "gold_reward": 750
+    },
+    "Démon Suprême": {
+        "health": 1200,
+        "attack": 110,
+        "defense": 45,
+        "level": 50,
+        "exp_reward": 3000,
+        "gold_reward": 1000
     }
 }
 
@@ -2322,7 +2767,9 @@ NPCS_DIALOGUE = {
     "Gardien du Tresor": "NOOOOOON! CE TRESOR EST A MOI!!!",
     "Colporteur Mystique": "Psst... J'ai un secret pour trouver de meilleurs trésors. Contre quelques pièces d'or, je peux améliorer votre chance de loot. Chaque achat augmente votre chance de 0.5%, et c'est cumulable à l'infini !",
     "Gardien du Portail": "Ce portail maudit mène aux Enfers... un royaume de souffrance et de ténèbres. Les démons qui y errent ont soif de chair vivante. Si vous osez y aller, le portail vous permettra de fuir... si vous survivez.",
-    "Esprit du Lac": "Ce sang... ce sont les âmes des damnés qui se noient ici depuis l'aube des temps. Leurs cris résonnent dans mes pensées. N'écoutez pas leurs murmures... ils veulent vous entraîner au fond."
+    "Esprit du Lac": "Ce sang... ce sont les âmes des damnés qui se noient ici depuis l'aube des temps. Leurs cris résonnent dans mes pensées. N'écoutez pas leurs murmures... ils veulent vous entraîner au fond.",
+    "Gardien de l'Arène": "Bienvenue dans l'Arène de Combat à Mort ! Parlez-moi pour entrer en combat et gagner des récompenses exclusives !",
+    "Arena Guardian": "Welcome to the Arena of Death! Talk to me to enter combat and earn exclusive rewards!"
 }
 
 # Configuration des BOSS - Créatures redoutables avec équipement
@@ -2381,6 +2828,171 @@ BOSSES = {
         "exp_reward": 1200,
         "gold_reward": 700,
         "icon": "💀🧟"
+    },
+    # ============ NOUVEAUX BOSS ============
+    
+    # Boss Épiques (Niveau 19-22)
+    "Seigneur des Ténèbres": {
+        "description": "Un seigneur démoniaque qui commande une armée d'ombres. Ses yeux brillent comme des braises.",
+        "base_health": 320,
+        "base_attack": 40,
+        "base_defense": 22,
+        "level": 19,
+        "rarity_pool": "epique",
+        "exp_reward": 1300,
+        "gold_reward": 750,
+        "icon": "👑😈",
+        "boss_loot": {
+            "guaranteed": ["Épée Sombre"],
+            "possible": ["Armure Abyssale", "Anneau de Protection"],
+            "rare": ["Lame du Néant"]
+        }
+    },
+    "Hydre à Trois Têtes": {
+        "description": "Une créature monstrueuse avec trois têtes qui repoussent si on ne les détruit pas simultanément.",
+        "base_health": 400,
+        "base_attack": 35,
+        "base_defense": 15,
+        "level": 20,
+        "rarity_pool": "epique",
+        "exp_reward": 1400,
+        "gold_reward": 800,
+        "icon": "🐍🐍🐍",
+        "boss_loot": {
+            "guaranteed": ["Venin de Hydre"],
+            "possible": ["Bouclier du Paladin", "Épée Vampirique"],
+            "rare": ["Trident des Abysses"]
+        }
+    },
+    "Golem de Diamant": {
+        "description": "Un colosse fait de diamant pur, presque invulnérable aux attaques physiques.",
+        "base_health": 450,
+        "base_attack": 28,
+        "base_defense": 35,
+        "level": 21,
+        "rarity_pool": "epique",
+        "exp_reward": 1500,
+        "gold_reward": 850,
+        "icon": "💎🤖",
+        "boss_loot": {
+            "guaranteed": ["Fragment de Diamant"],
+            "possible": ["Armure Mithril", "Bouclier du Paladin"],
+            "rare": ["Armure Céleste"]
+        }
+    },
+    "Vampire Ancestral": {
+        "description": "Un vampire millénaire qui draine la vie de ses victimes et se régénère.",
+        "base_health": 350,
+        "base_attack": 42,
+        "base_defense": 12,
+        "level": 22,
+        "rarity_pool": "epique",
+        "exp_reward": 1600,
+        "gold_reward": 900,
+        "icon": "🧛♂️",
+        "boss_loot": {
+            "guaranteed": ["Dent de Vampire"],
+            "possible": ["Cape des Ombres", "Anneau de Vitalité"],
+            "rare": ["Lame du Néant"]
+        }
+    },
+    
+    # Boss Légendaires (Niveau 23-30)
+    "Dragon de Glace": {
+        "description": "Un dragon dont le souffle gèle instantanément tout ce qu'il touche. Son armure de glace le rend extrêmement résistant.",
+        "base_health": 480,
+        "base_attack": 48,
+        "base_defense": 25,
+        "level": 23,
+        "rarity_pool": "legendaire",
+        "exp_reward": 1800,
+        "gold_reward": 1000,
+        "icon": "❄️🐉",
+        "boss_loot": {
+            "guaranteed": ["Écailles de Dragon Glacé"],
+            "possible": ["Bâton Glacial", "Armure de Brume"],
+            "rare": ["Bâton de Merlin", "Dragon Blanc"]
+        }
+    },
+    "Titanie, Reine des Fées": {
+        "description": "La souveraine du royaume féerique, capable de manipuler la magie naturelle avec une grâce mortelle.",
+        "base_health": 420,
+        "base_attack": 55,
+        "base_defense": 18,
+        "level": 24,
+        "rarity_pool": "legendaire",
+        "exp_reward": 2000,
+        "gold_reward": 1100,
+        "icon": "🧚♀️👑",
+        "boss_loot": {
+            "guaranteed": ["Poussière de Fée"],
+            "possible": ["Bâton du Sage", "Arc Sylvain"],
+            "rare": ["Bâton des Abysses", "Couronne de Pouvoir"]
+        }
+    },
+    "Minotaure du Labyrinthe": {
+        "description": "Un minotaure monstrueux piégé dans un labyrinthe sans fin. Sa force brute écrase tout sur son passage.",
+        "base_health": 520,
+        "base_attack": 50,
+        "base_defense": 30,
+        "level": 25,
+        "rarity_pool": "legendaire",
+        "exp_reward": 2200,
+        "gold_reward": 1200,
+        "icon": "🐂🔨",
+        "boss_loot": {
+            "guaranteed": ["Corne de Minotaure"],
+            "possible": ["Marteau de Guerre", "Armure Dragon"],
+            "rare": ["Gungnir, Lance d'Odin", "Mjolnir"]
+        }
+    },
+    "Nécromancien Suprême": {
+        "description": "Un maître des morts-vivants capable d'invoquer une armée de squelettes et de liches à sa volonté.",
+        "base_health": 400,
+        "base_attack": 52,
+        "base_defense": 20,
+        "level": 26,
+        "rarity_pool": "legendaire",
+        "exp_reward": 2400,
+        "gold_reward": 1300,
+        "icon": "🧙♂️💀",
+        "boss_loot": {
+            "guaranteed": ["Os Maudit"],
+            "possible": ["Bâton de Liche", "Robe d'Archimage"],
+            "rare": ["Bâton de Merlin", "Lame du Néant"]
+        }
+    },
+    "Phénix Renaissance": {
+        "description": "Un oiseau de feu qui renaît de ses cendres. Détruire son corps ne suffit pas... il faut briser son esprit.",
+        "base_health": 380,
+        "base_attack": 60,
+        "base_defense": 15,
+        "level": 28,
+        "rarity_pool": "legendaire",
+        "exp_reward": 2800,
+        "gold_reward": 1500,
+        "icon": "🔥🦅",
+        "boss_loot": {
+            "guaranteed": ["Plume de Phénix"],
+            "possible": ["Bâton Flamboyant", "Armure Céleste"],
+            "rare": ["Éclair Éternel", "Dragon de Feu"]
+        }
+    },
+    "Démon Suprême Malphas": {
+        "description": "Le seigneur des démons, dernière barrière avant les enfers. Son pouvoir corrompt tout ce qu'il touche.",
+        "base_health": 600,
+        "base_attack": 65,
+        "base_defense": 30,
+        "level": 30,
+        "rarity_pool": "legendaire",
+        "exp_reward": 3500,
+        "gold_reward": 2000,
+        "icon": "🔥👹💀",
+        "boss_loot": {
+            "guaranteed": ["Âme Corrompue", "Cœur de Démon"],
+            "possible": ["Lame du Néant", "Armure Abyssale"],
+            "rare": ["Excalibur", "Anneau Infini"]
+        }
     }
 }
 
@@ -2398,6 +3010,18 @@ BOSS_EQUIPMENT_CONFIG = {
         "health_bonus": 80,
         "items_count": 3
     }
+}
+
+# Boss spécifiques par location (pour un spawn ciblé)
+LOCATION_BOSS_MAPPING = {
+    "Montagne Glacée": ["Dragon de Glace", "Géant des Glaces"],
+    "Château des Ombres": ["Seigneur des Ténèbres", "Chevalier Noir"],
+    "Crypte Ancienne": ["Minotaure du Labyrinthe", "Liche", "Nécromancien Suprême"],
+    "Abîme du Démon": ["Démon Suprême Malphas", "Gardien des Abysses", "Entité Démoniaque"],
+    "Volcan Actif": ["Dragon de Feu", "Golem de Lave"],
+    "Foret Sombre": ["Hydre à Trois Têtes", "Vampire Ancestral"],
+    "Tour du Mage": ["Archimage Ancien", "Titanie, Reine des Fées", "Sorcière de Feu"],
+    "Crypte du Portail Maudit": ["Lich Immortel", "Seuil des Damnés"],
 }
 
 # ==================== SYSTÈME DE RUNES ====================
