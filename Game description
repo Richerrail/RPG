@@ -1,0 +1,13 @@
+Fonctionnalités principales
+
+     - 4 classes : Guerrier, Mage, Archer, Pilleur
+     - Combat au tour par tour
+     - ~25 lieux interconnectés
+     - Système de loot par rareté (commun/rare/épique/légendaire) avec ~150+ items
+     - Quêtes dynamiques adaptatives
+     - Runes (artisanat, bonus temporaires), Cartes permanentes (bonus persistants), Magasins
+     - Prestige/Réincarnation (niveau 30+)
+     - Une arène a mort comme End Game avec des récompenses folles
+     - Langue: FRANCAIS/ENGLISH
+
+    Le projet tourne sur Flask : http://127.0.0.1:5000
