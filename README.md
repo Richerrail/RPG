@@ -14,3 +14,5 @@ Python: winget install Python.Python
 
 # Start the game using a terminal or by double-clicking rpg_server.py
 python rpg_server.py
+
+HELP ME BUY A NEW PC https://gofund.me/4f2d4ae1f
