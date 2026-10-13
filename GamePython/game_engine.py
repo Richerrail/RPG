@@ -1,10 +1,11 @@
 # Game Engine - Moteur de jeu RPG
 from game_config import (
     GAME_CONFIG, LOCATIONS, ENEMIES, NPCS_DIALOGUE, ITEMS, SHOPS,
-    DIFFICULTY_SETTINGS, LOOT_BY_RARITY, CLASSES, DAILY_QUESTS,
+    DIFFICULTY_SETTINGS, LOOT_BY_RARITY, CLASSES,
     SKILLS, BOSSES, BOSS_EQUIPMENT_CONFIG, PROGRESSIVE_SKILLS,
     RUNES, RUNE_RECIPES, RUNE_RARITIES, RUNE_DROP_CHANCE,
-    CARDS, CARD_DROP_CHANCE, CARD_BOSS_MULTIPLIER
+    CARDS, CARD_DROP_CHANCE, CARD_BOSS_MULTIPLIER, LOCATION_BOSS_MAPPING,
+    DYNAMIC_QUEST_TEMPLATES, DYNAMIC_QUESTS_CONFIG
 )
 import random
 from datetime import datetime
@@ -37,7 +38,6 @@ class GameEngine:
         self.boss_defeated = {}
         self.game_started = datetime.now()
         self.difficulty = "moyen"
-        self.daily_quests_completed = []
         self.total_enemies_defeated = 0
         self.total_damage_dealt = 0
         self.total_damage_taken = 0
@@ -53,9 +53,15 @@ class GameEngine:
         self.skill_notifications = []
         self.is_boss_fight = False
         self.current_boss = None
-        self.daily_quests = {}
-        self.quest_progress = {}
-        self.completed_quests = []
+        
+        # Système de quêtes dynamiques
+        self.dynamic_quests = {}
+        self.dynamic_quest_progress = {}
+        self.last_quest_reset = None
+        self.dynamic_quests_completed = []
+        
+        # Générer les premières quêtes dynamiques si le joueur a un niveau suffisant
+        self.check_dynamic_quests_auto_reset()
 
         # Attributs spécifiques Pilleur
         self.innate_crit_chance = 0.0
@@ -63,11 +69,10 @@ class GameEngine:
         self.double_or_nothing_active = False
         self.fouille_accrue_active = False
         self.gold_multiplier_next_kill = 1
+        self.pacte_fievre_turns = 0
+        self.pacte_crit_bonus = 0.0
+        self.pacte_loot_bonus = 0.0
 
-        # Initialiser toutes les quêtes avec une progression de 0
-        for quest_id in DAILY_QUESTS:
-            self.quest_progress[quest_id] = 0
-        
         self.temporary_buffs = {}
         self.enemy_health = 0
         self.enemy_max_health = 0
@@ -87,6 +92,17 @@ class GameEngine:
         self.card_inventory = {}  # {"Carte de Force": 2, ...}
         self.cards_used = []  # Historique des cartes utilisées pour les bonus
 
+        # Système de Prestige / Réincarnation
+        self.prestige_level = 0  # Niveau de prestige (0 = pas de prestige)
+        self.reincarnation_count = 0  # Nombre total de réincarnations
+        self.arena_wins = 0  # Nombre de victoires en arène
+        self.arena_current_streak = 0  # Série de victoires actuelle en arène
+        self.arena_enemies_defeated = 0  # Ennemis vaincus dans l'arène cette session
+        self.in_arena = False  # Indique si le joueur est dans l'arène
+        self.arena_enemy = None  # Ennemi actuel de l'arène
+        self.arena_rewards = {"exp": 0, "gold": 0, "runes": {}, "cards": {}}  # Récompenses accumulées
+        self.last_arena_message = None  # Dernier message de l'arène
+
         # Langue
         self.language = "fr"
 
@@ -99,7 +115,8 @@ class GameEngine:
         for stat, value in class_data["base_stats"].items():
             self.player_stats[stat] = value
             self.base_stats[stat] = value
-        if class_name in SKILLS:
+        # Ne réinitialiser les compétences que si la classe change
+        if class_name not in self.skills_learned:
             self.skills_learned[class_name] = {}
             for skill_name, skill_data in SKILLS[class_name].items():
                 if skill_data.get("unlocked_at", 1) <= self.player_stats["level"]:
@@ -113,6 +130,288 @@ class GameEngine:
         # Débloquer les compétences progressives selon le niveau
         self.unlock_progressive_skills()
         return True
+    
+    def reincarnate(self):
+        """Réincarne le personnage - système de prestige"""
+        if self.player_stats["level"] < 30:
+            return False, t("Vous devez être au moins niveau 30 pour vous réincarner !", self.language)
+        
+        # Calculer le nombre de cartes à recevoir
+        player_level = self.player_stats["level"]
+        if player_level < 50:
+            num_cards = 1
+        elif player_level < 70:
+            num_cards = 3
+        elif player_level < 90:
+            num_cards = 5
+        else:
+            num_cards = 10
+        
+        # Augmenter le niveau de prestige
+        self.prestige_level += 1
+        self.reincarnation_count += 1
+        
+        # Sauvegarder les cartes actuelles et les bonus permanents avant réinitialisation
+        saved_cards = self.card_inventory.copy()
+        saved_runes = self.rune_inventory.copy()
+        saved_skills = {k: v.copy() if isinstance(v, dict) else v for k, v in self.skills_learned.items()}
+        saved_unlocked = self.unlocked_skills.copy()
+        saved_prestige = self.prestige_level
+        saved_reincarnations = self.reincarnation_count
+        
+        # Calculer les bonus permanents des cartes utilisées
+        card_bonuses = {"attack": 0, "defense": 0, "max_health": 0, "max_mana": 0, "loot_boost": 0}
+        for card_name in self.cards_used:
+            if card_name in CARDS:
+                card_data = CARDS[card_name]
+                stat = card_data.get("stat", "")
+                value = card_data.get("value", 0)
+                if stat in card_bonuses:
+                    card_bonuses[stat] += value
+        
+        # Réinitialiser les stats de base mais garder la classe
+        class_name = self.player_class
+        self.player_stats = GAME_CONFIG["player_stats"].copy()
+        self.base_stats = GAME_CONFIG["player_stats"].copy()
+        
+        # Reappliquer les stats de classe
+        if class_name and class_name in CLASSES:
+            class_data = CLASSES[class_name]
+            for stat, value in class_data["base_stats"].items():
+                self.player_stats[stat] = value
+                self.base_stats[stat] = value
+            self.set_class(class_name)  # Réappliquer les compétences de base
+        
+        # Réappliquer les bonus permanents des cartes utilisées
+        self.player_stats["attack"] += card_bonuses["attack"]
+        self.player_stats["defense"] += card_bonuses["defense"]
+        self.player_stats["max_health"] += card_bonuses["max_health"]
+        self.player_stats["health"] += card_bonuses["max_health"]  # Ajuster aussi la santé actuelle
+        self.player_stats["max_mana"] += card_bonuses["max_mana"]
+        self.player_stats["mana"] += card_bonuses["max_mana"]  # Ajuster aussi le mana actuel
+        
+        # Recalculer loot_boost_count à partir des cartes de loot_boost utilisées
+        # (chaque carte ajoute int(value / 0.5) comme dans use_card())
+        for card_name in self.cards_used:
+            if card_name in CARDS:
+                card_data = CARDS[card_name]
+                if card_data.get("stat") == "loot_boost":
+                    value = card_data.get("value", 0)
+                    if value >= 0.5:
+                        self.loot_boost_count += int(value / 0.5)
+                    else:
+                        self.loot_boost_count += 1
+        
+        # Réinitialiser l'inventaire mais garder les cartes et runes
+        self.inventory = {}
+        self.equipped = {"weapon": None, "armor": None, "accessory": None}
+        self.card_inventory = saved_cards
+        self.rune_inventory = saved_runes
+        
+        # Réinitialiser la position
+        self.current_location = GAME_CONFIG["starting_location"]
+        self.visited_locations = {self.current_location}
+        self.in_combat = False
+        self.in_arena = False
+        self.current_enemy = None
+        self.arena_enemy = None
+        self.game_over = False
+        
+        # Réinitialiser les quêtes dynamiques
+        self.dynamic_quests = {}
+        self.dynamic_quest_progress = {}
+        self.dynamic_quests_completed = []
+        
+        # Restaurer le prestige et les compétences
+        self.prestige_level = saved_prestige
+        self.reincarnation_count = saved_reincarnations
+        self.skills_learned = saved_skills
+        self.unlocked_skills = saved_unlocked
+        
+        # Donner les nouvelles cartes aléatoires
+        for _ in range(num_cards):
+            self.add_random_card()
+        
+        # Réinitialiser les stats de combat
+        self.combat_turn = 0
+        self.total_damage_dealt = 0
+        self.total_damage_taken = 0
+        
+        # Réinitialiser l'état de l'arène
+        self.arena_rewards = {"exp": 0, "gold": 0, "runes": {}, "cards": {}}
+        self.arena_enemies_defeated = 0
+        self.arena_current_streak = 0
+        
+        return True, f"{t('Réincarnation réussie !', self.language)} {t('Vous êtes maintenant Prestige', self.language)} {self.prestige_level}. {t('Vous avez reçu', self.language)} {num_cards} {t('cartes !', self.language)}"
+    
+    def can_enter_arena(self):
+        """Vérifie si le joueur peut entrer dans l'arène (nécessite au moins 1 réincarnation)"""
+        return self.reincarnation_count >= 1
+    
+    def add_random_card(self):
+        """Ajoute une carte aléatoire à l'inventaire"""
+        if not CARDS:
+            return
+        
+        # Filtrer les cartes accessibles selon le niveau
+        available_cards = [card for card, data in CARDS.items() 
+                          if self.player_stats.get("level", 1) >= data.get("required_level", 1)]
+        
+        if not available_cards:
+            return
+        
+        card_name = random.choice(available_cards)
+        self.card_inventory[card_name] = self.card_inventory.get(card_name, 0) + 1
+    
+    def enter_arena(self):
+        """Entrer dans l'arène de combat à mort"""
+        if not self.can_enter_arena():
+            return False, t("Vous devez avoir au moins 1 réincarnation pour entrer dans l'arène !", self.language)
+        
+        if self.in_combat:
+            return False, t("Vous êtes déjà en combat !", self.language)
+        
+        if self.in_arena:
+            return False, t("Vous êtes déjà dans l'arène !", self.language)
+        
+        # Réinitialiser les récompenses de l'arène
+        self.arena_rewards = {"exp": 0, "gold": 0, "runes": {}, "cards": {}}
+        self.arena_enemies_defeated = 0
+        self.arena_current_streak = 0
+        
+        # Créer le premier ennemi de l'arène
+        self.start_arena_fight()
+        
+        return True, t("Bienvenue dans l'Arène de Combat à Mort ! Combattez jusqu'à la mort pour obtenir des récompenses !", self.language)
+    
+    def start_arena_fight(self):
+        """Démarre un combat dans l'arène"""
+        if not self.in_arena and not self.can_enter_arena():
+            return t("Vous ne pouvez pas commencer un combat d'arène ici.", self.language)
+        
+        # Créer un ennemi adapté au niveau du joueur
+        player_level = self.player_stats["level"]
+        
+        # Sélectionner un ennemi aléatoire parmi ceux adaptés au niveau
+        suitable_enemies = []
+        for enemy_name, enemy_data in ENEMIES.items():
+            if enemy_data["level"] >= player_level - 5 and enemy_data["level"] <= player_level + 5:
+                suitable_enemies.append(enemy_name)
+        
+        if not suitable_enemies:
+            suitable_enemies = list(ENEMIES.keys())
+        
+        enemy_name = random.choice(suitable_enemies)
+        enemy_data = ENEMIES[enemy_name].copy()
+        
+        # Booster les stats pour l'arène (50% de bonus)
+        enemy_data["health"] = int(enemy_data["health"] * 1.5)
+        enemy_data["attack"] = int(enemy_data["attack"] * 1.5)
+        enemy_data["defense"] = int(enemy_data["defense"] * 1.3)
+        enemy_data["level"] = player_level
+        enemy_data["exp_reward"] = int(enemy_data["exp_reward"] * 1.5)
+        enemy_data["gold_reward"] = int(enemy_data["gold_reward"] * 1.5)
+        
+        self.current_enemy = {
+            "name": enemy_name,
+            "is_boss": False,
+            "health": enemy_data["health"],
+            "max_health": enemy_data["health"],
+            "attack": enemy_data["attack"],
+            "defense": enemy_data["defense"],
+            "level": enemy_data["level"],
+            "exp_reward": enemy_data["exp_reward"],
+            "gold_reward": enemy_data["gold_reward"],
+            "description": ENEMIES.get(enemy_name, {}).get("description", ""),
+            "icon": ENEMIES.get(enemy_name, {}).get("icon", "👹")
+        }
+        
+        self.arena_enemy = self.current_enemy.copy()
+        self.enemy_health = self.current_enemy.get("health", 1)
+        self.enemy_max_health = self.current_enemy.get("max_health", 1)
+        self.enemy_level = self.current_enemy.get("level", 1)
+        self.enemy_attack = self.current_enemy.get("attack", 5)
+        self.enemy_defense = self.current_enemy.get("defense", 0)
+        self.in_combat = True
+        self.in_arena = True
+        self.combat_turn = 0
+        
+        return t("Un combat d'arène a commencé contre", self.language) + f" {t(enemy_name, self.language)} !"
+    
+    def leave_arena(self):
+        """Quitter l'arène (sans récompense)"""
+        if not self.in_arena:
+            return t("Vous n'êtes pas dans l'arène.", self.language)
+        
+        # Réinitialiser l'état de l'arène
+        self.in_arena = False
+        self.arena_rewards = {"exp": 0, "gold": 0, "runes": {}, "cards": {}}
+        self.arena_enemies_defeated = 0
+        self.arena_current_streak = 0
+        
+        if self.in_combat:
+            self.in_combat = False
+            self.current_enemy = None
+            self.arena_enemy = None
+            self.enemy_health = 0
+            self.enemy_max_health = 0
+        
+        return t("Vous avez quitté l'arène. Vos récompenses sont perdues !", self.language)
+    
+    def claim_arena_rewards(self):
+        """Récupérer les récompenses de l'arène (appelé à la mort)"""
+        if not self.in_arena:
+            return t("Vous n'êtes pas dans l'arène.", self.language)
+        
+        # Appliquer les récompenses accumulées
+        exp_gained = self.arena_rewards["exp"]
+        gold_gained = self.arena_rewards["gold"]
+        self.player_stats["exp"] += exp_gained
+        self.player_stats["gold"] += gold_gained
+        
+        # Ajouter les runes
+        runes_message = ""
+        for rune, qty in self.arena_rewards["runes"].items():
+            self.rune_inventory[rune] = self.rune_inventory.get(rune, 0) + qty
+            runes_message += f"\n🔮 {t('Rune :', self.language)} {rune} (x{qty})"
+        
+        # Ajouter les cartes
+        cards_message = ""
+        for card, qty in self.arena_rewards["cards"].items():
+            self.card_inventory[card] = self.card_inventory.get(card, 0) + qty
+            cards_message += f"\n🃏 {card} (x{qty})"
+        
+        # Sauvegarder le nombre d'ennemis vaincus avant réinitialisation
+        enemies_defeated_display = self.arena_enemies_defeated
+        
+        # Incrémenter le compteur de victoires si au moins 1 ennemi vaincu
+        if enemies_defeated_display > 0:
+            self.arena_wins += 1
+        
+        # Réinitialiser
+        self.arena_rewards = {"exp": 0, "gold": 0, "runes": {}, "cards": {}}
+        self.arena_enemies_defeated = 0
+        self.arena_current_streak = 0
+        self.in_arena = False
+        
+        # Retourner un message de résumé
+        message = t("Vous avez été vaincu en arène après avoir vaincu", self.language) + f" {enemies_defeated_display} " + t("ennemis !", self.language)
+        message += f"\n{t('Récompenses :', self.language)}"
+        message += f"\n⭐ {exp_gained} XP"
+        message += f"\n💰 {gold_gained} " + t("or", self.language)
+        
+        # Ajouter des messages explicites si pas de runes/cartes
+        if runes_message:
+            message += runes_message
+        else:
+            message += f"\n{t('Aucune rune obtenue.', self.language)}"
+        
+        if cards_message:
+            message += cards_message
+        else:
+            message += f"\n{t('Aucune carte obtenue.', self.language)}"
+        
+        return message
     
     def get_location_description(self):
         if self.current_location not in LOCATIONS:
@@ -238,6 +537,10 @@ class GameEngine:
         if random.random() < 0.25 and location_data.get("enemies"):
             exploration_result += "\n" + t("Un ennemi vous barre le chemin !", self.language)
             self.start_fight()
+        
+        # Mettre à jour les quêtes dynamiques (exploration)
+        self.update_dynamic_quest_progress("explore")
+        
         return exploration_result
     
     def start_fight(self, enemy=None):
@@ -250,7 +553,18 @@ class GameEngine:
             return t("Pas d'ennemi disponible !", self.language)
         
         if random.random() < self.boss_spawn_chance and BOSSES:
-            boss_name = random.choice(list(BOSSES.keys()))
+            # Vérifier si la location a des boss spécifiques
+            location_name = LOCATIONS.get(self.current_location, {}).get("name", self.current_location)
+            possible_bosses = LOCATION_BOSS_MAPPING.get(location_name, list(BOSSES.keys()))
+            
+            # Filtrer pour ne garder que les boss qui existent dans BOSSES
+            possible_bosses = [b for b in possible_bosses if b in BOSSES]
+            
+            # Si aucun boss spécifique, prendre tous les boss
+            if not possible_bosses:
+                possible_bosses = list(BOSSES.keys())
+            
+            boss_name = random.choice(possible_bosses)
             boss_data = BOSSES[boss_name].copy()
             self.current_enemy = {
                 "name": boss_name,
@@ -352,7 +666,8 @@ class GameEngine:
         enemy_damage = max(1, enemy_damage - (player_defense + def_boost) // 2)
 
         # Déterminer si c'est un coup critique
-        is_critical = random.random() < (0.1 + self.innate_crit_chance)
+        pacte_crit = self.pacte_crit_bonus if self.pacte_fievre_turns > 0 else 0.0
+        is_critical = random.random() < (0.1 + self.innate_crit_chance + pacte_crit)
         # Rune: guaranteed_crit
         if self.has_rune_buff("guaranteed_crit"):
             is_critical = True
@@ -388,10 +703,20 @@ class GameEngine:
         self.tick_rune_buffs()
         
         if self.current_enemy["health"] <= 0:
-            loot = self.get_loot(self.current_enemy.get("level", 1))
+            enemy_name = self.current_enemy["name"]
             exp_gain = self.current_enemy.get("exp_reward", 50)
             gold_gain = self.current_enemy.get("gold_reward", 20)
-            enemy_name = self.current_enemy["name"]
+            
+            # Loot spécifique pour les boss
+            if self.current_enemy.get("is_boss"):
+                loot = self.get_boss_loot(enemy_name)
+                # Ajouter aussi du loot aléatoire normal (50% de chance)
+                if random.random() < 0.50:
+                    normal_loot = self.get_loot(self.current_enemy.get("level", 1))
+                    for item, qty in normal_loot.items():
+                        loot[item] = loot.get(item, 0) + qty
+            else:
+                loot = self.get_loot(self.current_enemy.get("level", 1))
             
             # Pilleur : Trésor Vivant (gold bonus passif inné)
             if self.player_class == "Pilleur":
@@ -413,85 +738,138 @@ class GameEngine:
                 gold_gain += fouille_gold
                 combat_log += f"\n🔍 {t('Fouille Accrue :', self.language)} +{fouille_gold} " + t("or bonus !", self.language)
 
-            self.player_stats["gold"] += gold_gain
-            self.update_quest_progress(enemy_name=enemy_name)
-            self.update_quest_progress(gold_gain=gold_gain)
-            self.add_exp(exp_gain)
-            self.total_enemies_defeated += 1
+            # Gestion des récompenses - Arène vs Normal
+            if self.in_arena:
+                # En arène : accumuler les récompenses (pas d'XP/or direct, pas de loot normal)
+                self.arena_rewards["exp"] += exp_gain
+                self.arena_rewards["gold"] += gold_gain
+                self.arena_enemies_defeated += 1
+                self.arena_current_streak += 1
+                
+                # Runes et cartes vont dans les récompenses de l'arène (sans les afficher dans le combat log)
+                rune_drop = self.drop_rune(self.current_enemy.get("level", 1))
+                if rune_drop:
+                    self.arena_rewards["runes"][rune_drop] = self.arena_rewards["runes"].get(rune_drop, 0) + 1
+                
+                card_drop = self.drop_card(self.current_enemy.get("level", 1), self.current_enemy.get("is_boss", False))
+                if card_drop:
+                    self.arena_rewards["cards"][card_drop] = self.arena_rewards["cards"].get(card_drop, 0) + 1
+                
+                combat_log += f"\n{self.current_enemy['name']} " + t("a été vaincu !", self.language)
+                combat_log += f"\n{t('Victoires en arène :', self.language)} {self.arena_current_streak}"
+                
+                # Passer au prochain ennemi de l'arène
+                self.start_arena_fight()
+                return {
+                    "message": combat_log,
+                    "action": "kill",
+                    "enemy_defeated": True,
+                    "player_damage": player_damage,
+                    "enemy_damage": 0,
+                    "is_critical": is_critical
+                }
+            else:
+                # Mode normal : donner les récompenses immédiatement
+                self.player_stats["gold"] += gold_gain
+                self.update_dynamic_quest_progress("kill_enemies")
+                self.update_dynamic_quest_progress("collect_gold", gold_gain)
+                self.add_exp(exp_gain)
+                self.total_enemies_defeated += 1
 
-            if self.current_enemy.get("is_boss"):
-                self.boss_defeated[self.current_enemy["name"]] = True
+                if self.current_enemy.get("is_boss"):
+                    self.boss_defeated[self.current_enemy["name"]] = True
 
-            combat_log += f"\n{self.current_enemy['name']} " + t("a été vaincu !", self.language) + "\n"
-            combat_log += t("Expérience gagnée :", self.language) + f" {exp_gain}\n" + t("Or gagné :", self.language) + f" {gold_gain}\n"
+                combat_log += f"\n{self.current_enemy['name']} " + t("a été vaincu !", self.language) + "\n"
+                combat_log += t("Expérience gagnée :", self.language) + f" {exp_gain}\n" + t("Or gagné :", self.language) + f" {gold_gain}\n"
 
-            # Pilleur : Double ou Rien sur le loot
-            if self.double_or_nothing_active:
-                self.double_or_nothing_active = False
-                if random.random() < 0.5:
+                # Pilleur : Double ou Rien sur le loot
+                if self.double_or_nothing_active:
+                    self.double_or_nothing_active = False
+                    if random.random() < 0.5:
+                        for item, qty in loot.items():
+                            loot[item] = qty * 2
+                        combat_log += f"\n🎲 {t('Double ou Rien : DOUBLE ! Loot doublé !', self.language)}\n"
+                    else:
+                        loot = {}
+                        combat_log += f"\n🎲 {t('Double ou Rien : RIEN ! Loot perdu...', self.language)}\n"
+
+                if loot:
                     for item, qty in loot.items():
-                        loot[item] = qty * 2
-                    combat_log += f"\n🎲 {t('Double ou Rien : DOUBLE ! Loot doublé !', self.language)}\n"
+                        self.inventory[item] = self.inventory.get(item, 0) + qty
+                        combat_log += t("Butin :", self.language) + f" {item} (x{qty})\n"
+
+                # Pilleur : Fouille Accrue — reset après kill
+                if self.fouille_accrue_active:
+                    self.fouille_accrue_active = False
+
+                rune_drop = self.drop_rune(self.current_enemy.get("level", 1))
+                if rune_drop:
+                    combat_log += t("Rune :", self.language) + f" {rune_drop}\n"
+
+                card_drop = self.drop_card(self.current_enemy.get("level", 1), self.current_enemy.get("is_boss", False))
+                if card_drop:
+                    combat_log += "CARTE : " + f"{card_drop}\n"
+
+                # Mettre à jour les quêtes dynamiques
+                if self.current_enemy.get("is_boss"):
+                    self.update_dynamic_quest_progress("kill_bosses")
                 else:
-                    loot = {}
-                    combat_log += f"\n🎲 {t('Double ou Rien : RIEN ! Loot perdu...', self.language)}\n"
+                    self.update_dynamic_quest_progress("kill_enemies")
+                
+                # Vérifier si les quêtes dynamiques doivent être reset
+                self.check_dynamic_quests_auto_reset()
 
-            if loot:
-                for item, qty in loot.items():
-                    self.inventory[item] = self.inventory.get(item, 0) + qty
-                    combat_log += t("Butin :", self.language) + f" {item} (x{qty})\n"
-
-            # Pilleur : Fouille Accrue — reset après kill
-            if self.fouille_accrue_active:
-                self.fouille_accrue_active = False
-
-            rune_drop = self.drop_rune(self.current_enemy.get("level", 1))
-            if rune_drop:
-                combat_log += t("Rune :", self.language) + f" {rune_drop}\n"
-
-            card_drop = self.drop_card(self.current_enemy.get("level", 1), self.current_enemy.get("is_boss", False))
-            if card_drop:
-                combat_log += "CARTE : " + f"{card_drop}\n"
-
-            self.in_combat = False
-            self.current_enemy = None
-            self.enemy_health = 0
-            self.enemy_max_health = 0
-            return {
-                "message": combat_log,
-                "action": "kill",
-                "enemy_defeated": True,
-                "player_damage": player_damage,
-                "enemy_damage": 0,
-                "is_critical": is_critical
-            }
+                self.in_combat = False
+                self.current_enemy = None
+                self.enemy_health = 0
+                self.enemy_max_health = 0
+                return {
+                    "message": combat_log,
+                    "action": "kill",
+                    "enemy_defeated": True,
+                    "player_damage": player_damage,
+                    "enemy_damage": 0,
+                    "is_critical": is_critical
+                }
         
-        self.take_damage(enemy_damage)
-        combat_log += "\n" + t("L'ennemi a infligé", self.language) + f" {enemy_damage} " + t("dégâts !", self.language)
-
-        # Save enemy health before potential cleanup
-        current_enemy_health = self.current_enemy['health']
+        # Save enemy health before potential cleanup (take_damage might set current_enemy to None)
+        current_enemy_health = self.current_enemy.get("health", 0) if self.current_enemy else 0
+        
+        damage_taken, death_message = self.take_damage(enemy_damage)
+        combat_log += "\n" + t("L'ennemi a infligé", self.language) + f" {damage_taken} " + t("dégâts !", self.language)
 
         combat_log += "\n" + t("Vie ennemie :", self.language) + f" {current_enemy_health}"
         combat_log += "\n" + t("Votre vie :", self.language) + f" {self.player_stats['health']}"
 
         if self.player_stats['health'] <= 0:
             combat_log += "\n" + t("Vous avez été vaincu !", self.language)
+            
+            # En arène : ajouter le message des récompenses si disponible
+            if death_message:
+                combat_log += "\n" + death_message
+            
             self.in_combat = False
             self.current_enemy = None
             self.enemy_health = 0
             self.enemy_max_health = 0
-            self.reset_health()
+            
+            # En arène : ne pas réinitialiser la santé, récompenses déjà données dans take_damage
+            if not self.in_arena:
+                self.reset_health()
+            
             return {
                 "message": combat_log,
                 "action": "attack",
                 "player_damage": player_damage,
-                "enemy_damage": enemy_damage,
+                "enemy_damage": damage_taken,
                 "is_critical": is_critical,
                 "player_health": self.player_stats['health'],
                 "enemy_health": current_enemy_health
             }
         
+        # Tick Fièvre de l'Or (Pacte Doré)
+        if self.pacte_fievre_turns > 0:
+            self.pacte_fievre_turns -= 1
         self.combat_turn += 1
         return {
             "message": combat_log,
@@ -508,11 +886,32 @@ class GameEngine:
         damage = max(1, amount - (self.player_stats.get("armor", 0) + armor_bonus) // 2)
         self.player_stats["health"] -= damage
         self.total_damage_taken += damage
+        death_message = None
         if self.player_stats["health"] <= 0:
             self.player_stats["health"] = 0
-            self.game_over = True
             self.in_combat = False
-        return damage
+            
+            # Si mort en arène : récupérer les récompenses et NE PAS mettre game_over
+            if self.in_arena:
+                death_message = self.claim_arena_rewards()
+                self.in_arena = False
+                self.arena_enemy = None
+                self.current_enemy = None
+                self.enemy_health = 0
+                self.enemy_max_health = 0
+                self.enemy_level = 1
+                self.enemy_attack = 0
+                self.enemy_defense = 0
+                # Ne pas mettre game_over, le joueur continue à vivre après l'arène
+                # Réinitialiser la santé (sans changer de location)
+                self.reset_health(reset_location=False)
+                # Stocker le message pour affichage
+                self.last_arena_message = death_message
+            else:
+                # Mort normale : game over
+                self.game_over = True
+            
+        return damage, death_message
     
     def heal(self, amount):
         healed = min(amount, self.player_stats["max_health"] - self.player_stats["health"])
@@ -521,8 +920,7 @@ class GameEngine:
     
     def add_exp(self, amount):
         self.player_stats["exp"] += amount
-        # Mettre à jour la progression des quêtes d'XP
-        self.update_quest_progress(exp_gain=amount)
+        self.update_dynamic_quest_progress("gain_xp", amount)
         self.check_level_up()
     
     def check_level_up(self):
@@ -589,6 +987,9 @@ class GameEngine:
             drop_chance = 0.015 + (0.02 * base_prob * enemy_level) + loot_boost_bonus
             # Pilleur passif : qualité de loot augmentée
             drop_chance *= self.loot_quality_bonus
+            # Pilleur : Fièvre de l'Or (buff Pacte Doré)
+            if self.pacte_fievre_turns > 0:
+                drop_chance *= (1.0 + self.pacte_loot_bonus)
             # Pilleur : Fouille Accrue double la chance de loot
             if self.fouille_accrue_active:
                 drop_chance *= 2.0
@@ -596,6 +997,35 @@ class GameEngine:
                 item = random.choice(LOOT_BY_RARITY[rarity])
                 loot[item] = loot.get(item, 0) + 1
 
+        return loot
+    
+    def get_boss_loot(self, boss_name):
+        """Génère le loot spécifique pour un boss vaincu"""
+        loot = {}
+        if boss_name not in BOSSES:
+            return loot
+        
+        boss_data = BOSSES[boss_name]
+        boss_loot_config = boss_data.get("boss_loot", {})
+        
+        if not boss_loot_config:
+            return loot
+        
+        # Loot garanti (toujours obtenu)
+        for item in boss_loot_config.get("guaranteed", []):
+            if item in ITEMS:
+                loot[item] = loot.get(item, 0) + 1
+        
+        # Loot possible (70% de chance par item)
+        for item in boss_loot_config.get("possible", []):
+            if item in ITEMS and random.random() < 0.70:
+                loot[item] = loot.get(item, 0) + 1
+        
+        # Loot rare (30% de chance par item)
+        for item in boss_loot_config.get("rare", []):
+            if item in ITEMS and random.random() < 0.30:
+                loot[item] = loot.get(item, 0) + 1
+        
         return loot
     
     def equip_item(self, item_name, item_type):
@@ -720,6 +1150,9 @@ class GameEngine:
         if self.inventory[item_name] <= 0:
             del self.inventory[item_name]
         
+        # Mettre à jour les quêtes dynamiques (utilisation d'item consommable)
+        self.update_dynamic_quest_progress("use_items")
+        
         return effect_message
     
     def visit_shop(self, shop_name):
@@ -742,6 +1175,10 @@ class GameEngine:
             return t("Vous n'avez pas assez d'or !", self.language) + f" (" + t("Prix:", self.language) + f" {price}, " + t("Or:", self.language) + f" {self.player_stats['gold']})"
         self.player_stats["gold"] -= price
         self.inventory[item_name] = self.inventory.get(item_name, 0) + 1
+        
+        # Mettre à jour les quêtes dynamiques (achat d'item)
+        self.update_dynamic_quest_progress("buy_items")
+        
         return t("Vous avez acheté", self.language) + f" {item_name} " + t("pour", self.language) + f" {price} " + t("or !", self.language)
     
     def sell_item(self, item_name):
@@ -755,8 +1192,7 @@ class GameEngine:
         item_data = ITEMS[item_name]
         price = item_data.get("sell_price", item_data.get("price", 10) // 2)
         self.player_stats["gold"] += price
-        # Mettre à jour la progression des quêtes d'or
-        self.update_quest_progress(gold_gain=price)
+        self.update_dynamic_quest_progress("collect_gold", price)
         self.inventory[item_name] -= 1
         if self.inventory[item_name] <= 0:
             del self.inventory[item_name]
@@ -885,9 +1321,10 @@ class GameEngine:
         self.__init__()
         return t("Le jeu a été réinitialisé !", self.language)
     
-    def reset_health(self):
+    def reset_health(self, reset_location=False):
         self.player_stats["health"] = self.player_stats["max_health"]
-        self.current_location = GAME_CONFIG["starting_location"]
+        if reset_location:
+            self.current_location = GAME_CONFIG["starting_location"]
     
     def get_player_stats(self):
         stats = {
@@ -919,6 +1356,155 @@ class GameEngine:
         display += f"EXP: {stats['exp']}/{stats['exp_for_next_level']}"
         return display
     
+    def get_save_stats(self):
+        """Retourne toutes les stats à sauvegarder (utilisé pour la réincarnation, mort, sauvegarde manuelle)"""
+        return {
+            # Stats de base du joueur
+            'exp': self.player_stats['exp'],
+            'level': self.player_stats['level'],
+            'gold': self.player_stats['gold'],
+            'exp_for_next_level': self.player_stats['exp_for_next_level'],
+            'health': self.player_stats['health'],
+            'max_health': self.player_stats['max_health'],
+            'mana': self.player_stats['mana'],
+            'max_mana': self.player_stats['max_mana'],
+            'attack': self.player_stats['attack'],
+            'defense': self.player_stats['defense'],
+            
+            # Inventaire et équipement
+            'inventory': self.inventory.copy(),
+            'equipped': self.equipped.copy(),
+            
+            # Position et exploration
+            'current_location': self.current_location,
+            'visited_locations': list(self.visited_locations) if hasattr(self, 'visited_locations') else [],
+            
+            # Quêtes dynamiques
+            'dynamic_quest_progress': self.dynamic_quest_progress.copy(),
+            'dynamic_quests_completed': self.dynamic_quests_completed.copy(),
+            
+            # Compétences
+            'skills_learned': {k: v.copy() if isinstance(v, dict) else v for k, v in self.skills_learned.items()},
+            'unlocked_skills': self.unlocked_skills.copy(),
+            
+            # Runes
+            'rune_inventory': self.rune_inventory.copy(),
+            'loot_boost_count': self.loot_boost_count,
+            
+            # Cartes
+            'card_inventory': self.card_inventory.copy(),
+            'cards_used': self.cards_used.copy(),
+            
+            # Système de Prestige / Réincarnation
+            'prestige_level': self.prestige_level,
+            'reincarnation_count': self.reincarnation_count,
+            
+            # Système d'Arène
+            'in_arena': self.in_arena,
+            'arena_wins': self.arena_wins,
+            'arena_current_streak': self.arena_current_streak,
+            'arena_enemies_defeated': self.arena_enemies_defeated,
+            'arena_rewards': self.arena_rewards.copy(),
+            
+            # Statistiques de combat
+            'total_enemies_defeated': self.total_enemies_defeated,
+            'total_damage_dealt': self.total_damage_dealt,
+            'total_damage_taken': self.total_damage_taken,
+            
+            # Difficulté
+            'difficulty': self.difficulty
+        }
+    
+    def load_save_stats(self, saved_stats):
+        """Restaure toutes les stats depuis un dict de sauvegarde"""
+        # Stats de base du joueur
+        if 'exp' in saved_stats:
+            self.player_stats['exp'] = saved_stats['exp']
+        if 'level' in saved_stats:
+            self.player_stats['level'] = saved_stats['level']
+        if 'gold' in saved_stats:
+            self.player_stats['gold'] = saved_stats['gold']
+        if 'exp_for_next_level' in saved_stats:
+            self.player_stats['exp_for_next_level'] = saved_stats['exp_for_next_level']
+        if 'health' in saved_stats:
+            self.player_stats['health'] = saved_stats['health']
+        if 'max_health' in saved_stats:
+            self.player_stats['max_health'] = saved_stats['max_health']
+        if 'mana' in saved_stats:
+            self.player_stats['mana'] = saved_stats['mana']
+        if 'max_mana' in saved_stats:
+            self.player_stats['max_mana'] = saved_stats['max_mana']
+        if 'attack' in saved_stats:
+            self.player_stats['attack'] = saved_stats['attack']
+        if 'defense' in saved_stats:
+            self.player_stats['defense'] = saved_stats['defense']
+        
+        # Inventaire et équipement
+        if 'inventory' in saved_stats and isinstance(saved_stats['inventory'], dict):
+            self.inventory = saved_stats['inventory'].copy()
+        if 'equipped' in saved_stats and isinstance(saved_stats['equipped'], dict):
+            self.equipped = saved_stats['equipped'].copy()
+        
+        # Position et exploration
+        if 'current_location' in saved_stats:
+            self.current_location = saved_stats['current_location']
+        if 'visited_locations' in saved_stats:
+            self.visited_locations = set(saved_stats['visited_locations'])
+        
+        # Quêtes dynamiques
+        if 'dynamic_quest_progress' in saved_stats and isinstance(saved_stats['dynamic_quest_progress'], dict):
+            self.dynamic_quest_progress = saved_stats['dynamic_quest_progress'].copy()
+        if 'dynamic_quests_completed' in saved_stats and isinstance(saved_stats['dynamic_quests_completed'], list):
+            self.dynamic_quests_completed = saved_stats['dynamic_quests_completed'].copy()
+        
+        # Compétences
+        if 'skills_learned' in saved_stats and isinstance(saved_stats['skills_learned'], dict):
+            self.skills_learned = {k: v.copy() if isinstance(v, dict) else v for k, v in saved_stats['skills_learned'].items()}
+        if 'unlocked_skills' in saved_stats and isinstance(saved_stats['unlocked_skills'], dict):
+            self.unlocked_skills = saved_stats['unlocked_skills'].copy()
+        
+        # Runes
+        if 'rune_inventory' in saved_stats and isinstance(saved_stats['rune_inventory'], dict):
+            self.rune_inventory = saved_stats['rune_inventory'].copy()
+        if 'loot_boost_count' in saved_stats:
+            self.loot_boost_count = saved_stats['loot_boost_count']
+        
+        # Cartes
+        if 'card_inventory' in saved_stats and isinstance(saved_stats['card_inventory'], dict):
+            self.card_inventory = saved_stats['card_inventory'].copy()
+        if 'cards_used' in saved_stats and isinstance(saved_stats['cards_used'], list):
+            self.cards_used = saved_stats['cards_used'].copy()
+        
+        # Système de Prestige / Réincarnation
+        if 'prestige_level' in saved_stats:
+            self.prestige_level = saved_stats['prestige_level']
+        if 'reincarnation_count' in saved_stats:
+            self.reincarnation_count = saved_stats['reincarnation_count']
+        
+        # Système d'Arène
+        if 'in_arena' in saved_stats:
+            self.in_arena = saved_stats['in_arena']
+        if 'arena_wins' in saved_stats:
+            self.arena_wins = saved_stats['arena_wins']
+        if 'arena_current_streak' in saved_stats:
+            self.arena_current_streak = saved_stats['arena_current_streak']
+        if 'arena_enemies_defeated' in saved_stats:
+            self.arena_enemies_defeated = saved_stats['arena_enemies_defeated']
+        if 'arena_rewards' in saved_stats and isinstance(saved_stats['arena_rewards'], dict):
+            self.arena_rewards = saved_stats['arena_rewards'].copy()
+        
+        # Statistiques de combat
+        if 'total_enemies_defeated' in saved_stats:
+            self.total_enemies_defeated = saved_stats['total_enemies_defeated']
+        if 'total_damage_dealt' in saved_stats:
+            self.total_damage_dealt = saved_stats['total_damage_dealt']
+        if 'total_damage_taken' in saved_stats:
+            self.total_damage_taken = saved_stats['total_damage_taken']
+        
+        # Difficulté
+        if 'difficulty' in saved_stats:
+            self.difficulty = saved_stats['difficulty']
+    
     def get_inventory_info(self):
         inventory_info = {
             "items": self.inventory.copy(),
@@ -928,31 +1514,38 @@ class GameEngine:
         return inventory_info
     
     def get_quests_display(self):
-        quests_list = []
-        if not DAILY_QUESTS:
-            return quests_list
-        for quest_id, quest_data in DAILY_QUESTS.items():
-            target_count = quest_data.get('target_count', quest_data.get('target_gold', quest_data.get('target_exp', 1)))
-            quest_info = {
-                'id': quest_id,
-                'name': quest_id,
-                'icon': quest_data.get('icon', '📜'),
-                'description': quest_data.get('description', t('Pas de description', self.language)),
-                'reward_exp': quest_data.get('reward_exp', 0),
-                'reward_gold': quest_data.get('reward_gold', 0),
-                'reward_item': quest_data.get('reward_item', ''),
-                'progress': self.quest_progress.get(quest_id, 0),
-                'target': target_count,
-                'completed': quest_id in self.completed_quests
-            }
-            quests_list.append(quest_info)
-        return quests_list
+        return self.get_dynamic_quests_display()
     
     def close_shop(self):
         self.current_shop = None
         return t("Magasin fermé.", self.language)
     
     def talk_to_npc(self, npc_name):
+        # Cas spécial : Gardien de l'Arène permet d'entrer dans l'arène
+        if npc_name in ["Gardien de l'Arène", "Arena Guardian"]:
+            if not self.can_enter_arena():
+                return f"<p><strong>{npc_name}:</strong> " + t("Vous devez avoir au moins 1 réincarnation pour entrer dans l'arène !", self.language) + "</p>"
+            
+            if self.in_combat:
+                return f"<p><strong>{npc_name}:</strong> " + t("Vous êtes déjà en combat !", self.language) + "</p>"
+            
+            # Si on n'est pas à l'arène, s'y rendre d'abord
+            if self.current_location != "arene":
+                move_result = self.move("arene")
+                # Si le déplacement a échoué (ex: pas de sortie vers arene), retourner l'erreur
+                if "ne pouvez pas" in move_result or "Vous ne pouvez pas" in move_result:
+                    return f"<p><strong>{npc_name}:</strong> {move_result}</p>"
+            
+            if self.in_arena:
+                return f"<p><strong>{npc_name}:</strong> " + t("Vous êtes déjà dans l'arène !", self.language) + "</p>"
+            
+            # Entrer dans l'arène
+            success, message = self.enter_arena()
+            if success:
+                return f"<p><strong>{npc_name}:</strong> {message}</p>"
+            else:
+                return f"<p><strong>{npc_name}:</strong> {message}</p>"
+        
         if npc_name not in NPCS_DIALOGUE:
             return f"NPC {npc_name} " + t("non trouvé.", self.language)
         dialogue_text = NPCS_DIALOGUE[npc_name]
@@ -983,16 +1576,26 @@ class GameEngine:
     def rest(self):
         if self.in_combat:
             return t("Vous ne pouvez pas vous reposer pendant un combat !", self.language)
-        heal_amount = int(self.player_stats["max_health"] * 0.3)
-        mana_amount = int(self.player_stats["max_mana"] * 0.2)
-        healed = self.heal(heal_amount)
-        mana_restored = min(mana_amount, self.player_stats["max_mana"] - self.player_stats["mana"])
-        self.player_stats["mana"] += mana_restored
-        return t("Vous vous reposez...", self.language) + " " + t("Santé restaurée :", self.language) + f" {healed} HP, " + t("Mana restauré :", self.language) + f" {mana_restored} MP."
+
+        # 50% de chance de déclencher un combat pendant le repos
+        if random.random() < 0.5:
+            message = t("Vous vous reposez... mais un ennemi vous surprend !", self.language) + "\n"
+            fight_msg = self.start_fight()
+            return message + fight_msg
+
+        # Pas de combat : récupération totale HP et mana
+        hp_missing = self.player_stats["max_health"] - self.player_stats["health"]
+        mana_missing = self.player_stats["max_mana"] - self.player_stats["mana"]
+        self.player_stats["health"] = self.player_stats["max_health"]
+        self.player_stats["mana"] = self.player_stats["max_mana"]
+        return t("Vous vous reposez...", self.language) + " " + t("Santé restaurée :", self.language) + f" {hp_missing} HP, " + t("Mana restauré :", self.language) + f" {mana_missing} MP. " + t("Récupération totale !", self.language)
     
     def use_skill(self, skill_name):
         if not self.player_class:
             return {"message": t("Vous n'avez pas de classe!", self.language), "action": "none"}
+        
+        # Mettre à jour les quêtes dynamiques (utilisation de compétence)
+        self.update_dynamic_quest_progress("use_skills")
         
         # Vérifier d'abord dans les compétences de base (SKILLS)
         class_skills = SKILLS.get(self.player_class, {})
@@ -1024,7 +1627,7 @@ class GameEngine:
         
         # Déterminer le type d'animation selon la compétence avec match/case
         match skill_name:
-            case "Éclair" | "Boule de Feu" | "Météorite" | "Tir de Précision" | "Charge Furieuse" | "Coup Mortel" | "Coup Puissant" | "Ruée d'Or" | "Double ou Rien" | "Dévaliser" | "Coup de Chance":
+            case "Éclair" | "Boule de Feu" | "Météorite" | "Tir de Précision" | "Charge Furieuse" | "Coup Mortel" | "Coup Puissant" | "Ruée d'Or" | "Double ou Rien" | "Pacte Doré" | "Coup de Chance":
                 skill_type = "magic"
             case "Soin" | "Défense Renforcée" | "Esquive" | "Glaciation" | "Téléportation" | "Fouille Accrue":
                 skill_type = "heal"
@@ -1096,9 +1699,147 @@ class GameEngine:
         if skill_name == "Double ou Rien":
             self.double_or_nothing_active = True
 
-        # Pilleur : Dévaliser — critique garanti
-        if skill_data.get("guaranteed_crit"):
-            pass  # Sera géré dans la section critique via force-crit
+        # Pilleur : Pacte Doré — sacrifice HP pour dégâts + loot garanti
+        if skill_name == "Pacte Doré":
+            hp_cost = int(self.player_stats["health"] * skill_data.get("hp_cost_percent", 0.30))
+            hp_cost = max(1, hp_cost)
+            self.player_stats["health"] -= hp_cost
+            if self.player_stats["health"] <= 1:
+                self.player_stats["health"] = 1
+
+            pacte_damage = int(hp_cost * skill_data.get("damage_per_hp_lost", 3.0))
+            pacte_damage += self.player_stats["attack"]
+
+            buff_name = skill_data.get("buff_name", "Fièvre de l'Or")
+            buff_duration = skill_data.get("buff_duration", 3)
+            self.pacte_fievre_turns = buff_duration
+            self.pacte_crit_bonus = skill_data.get("buff_crit_bonus", 0.15)
+            self.pacte_loot_bonus = skill_data.get("buff_loot_bonus", 0.25)
+
+            pacte_result = t("Vous avez utilisé", self.language) + f" {skill_name}!\n"
+            pacte_result += f"🩸 {t('Sacrifice :', self.language)} -{hp_cost} HP\n"
+            pacte_result += f"💥 {t('Dégâts du pacte :', self.language)} {pacte_damage}\n"
+            pacte_result += f"🔥 {buff_name} {t('activé pour', self.language)} {buff_duration} {t('tours', self.language)} (+{int(self.pacte_crit_bonus*100)}% crit, +{int(self.pacte_loot_bonus*100)}% loot)\n"
+
+            if self.in_combat and self.current_enemy:
+                self.current_enemy["health"] -= pacte_damage
+                total_damage = pacte_damage
+                self.enemy_health = self.current_enemy.get("health", 0)
+
+                if self.current_enemy["health"] <= 0:
+                    loot = self.get_loot(self.current_enemy.get("level", 1))
+                    exp_gain = self.current_enemy.get("exp_reward", 50)
+                    gold_gain = self.current_enemy.get("gold_reward", 20)
+                    enemy_name = self.current_enemy["name"]
+
+                    if self.player_class == "Pilleur":
+                        tresor_bonus = int(gold_gain * 0.15)
+                        gold_gain += tresor_bonus
+                        pacte_result += f"\n💎 {t('Trésor Vivant :', self.language)} +{tresor_bonus} " + t("or bonus !", self.language)
+
+                    if self.fouille_accrue_active:
+                        fouille_gold = int(gold_gain * 0.5)
+                        gold_gain += fouille_gold
+                        pacte_result += f"\n🔍 {t('Fouille Accrue :', self.language)} +{fouille_gold} " + t("or bonus !", self.language)
+
+                    self.player_stats["gold"] += gold_gain
+                    self.update_dynamic_quest_progress("kill_enemies")
+                    self.update_dynamic_quest_progress("collect_gold", gold_gain)
+                    self.add_exp(exp_gain)
+                    self.total_enemies_defeated += 1
+
+                    if self.current_enemy.get("is_boss"):
+                        self.boss_defeated[self.current_enemy["name"]] = True
+
+                    pacte_result += f"\n{enemy_name} " + t("a été vaincu!", self.language) + "\n"
+                    pacte_result += t("Expérience gagnée:", self.language) + f" {exp_gain}, " + t("Or gagné:", self.language) + f" {gold_gain}\n"
+
+                    # Loot garanti selon HP restant
+                    hp_percent = self.player_stats["health"] / self.player_stats["max_health"]
+                    if hp_percent < 0.20:
+                        guaranteed_rarity = "legendaire"
+                    elif hp_percent < 0.50:
+                        guaranteed_rarity = "epique"
+                    else:
+                        guaranteed_rarity = "rare"
+
+                    if guaranteed_rarity in LOOT_BY_RARITY:
+                        guaranteed_item = random.choice(LOOT_BY_RARITY[guaranteed_rarity])
+                        loot[guaranteed_item] = loot.get(guaranteed_item, 0) + 1
+                        pacte_result += f"\n🩸💰 {t('Pacte Doré :', self.language)} {guaranteed_item} ({guaranteed_rarity}) — HP: {int(hp_percent*100)}%\n"
+
+                    if loot:
+                        for item, qty in loot.items():
+                            self.inventory[item] = self.inventory.get(item, 0) + qty
+                            pacte_result += t("Butin:", self.language) + f" {item} (x{qty})\n"
+
+                    if self.fouille_accrue_active:
+                        self.fouille_accrue_active = False
+
+                    rune_drop = self.drop_rune(self.current_enemy.get("level", 1))
+                    if rune_drop:
+                        pacte_result += t("Rune :", self.language) + f" {rune_drop}\n"
+
+                    card_drop = self.drop_card(self.current_enemy.get("level", 1), self.current_enemy.get("is_boss", False))
+                    if card_drop:
+                        pacte_result += f"CARTE : {card_drop}\n"
+
+                    self.in_combat = False
+                    self.current_enemy = None
+                    self.enemy_health = 0
+                    self.enemy_max_health = 0
+                    return {
+                        "message": pacte_result,
+                        "action": "kill",
+                        "skill_type": skill_type,
+                        "total_damage": total_damage,
+                        "is_critical": False,
+                        "enemy_defeated": True
+                    }
+
+                # Ennemi encore vivant — riposte
+                enemy_atk = self.current_enemy.get("attack", 5)
+                enemy_damage = max(1, enemy_atk + random.randint(-2, 3) - self.player_stats["defense"] // 2)
+                damage_taken, death_message = self.take_damage(enemy_damage)
+                pacte_result += f"\n{self.current_enemy['name']} " + t("riposte et inflige", self.language) + f" {damage_taken} " + t("dégâts !", self.language)
+                pacte_result += f"\n{t('Vie ennemie :', self.language)} {self.current_enemy['health']}"
+                pacte_result += f"\n{t('Votre vie :', self.language)} {self.player_stats['health']}"
+
+                if self.player_stats["health"] <= 0:
+                    pacte_result += "\n" + t("Vous avez été vaincu !", self.language)
+                    if death_message:
+                        pacte_result += "\n" + death_message
+                    self.in_combat = False
+                    self.current_enemy = None
+                    # En arène : ne pas réinitialiser la santé, récompenses déjà données
+                    if not self.in_arena:
+                        self.reset_health()
+                    return {
+                        "message": pacte_result,
+                        "action": "skill_attack",
+                        "skill_type": skill_type,
+                        "total_damage": total_damage,
+                        "enemy_damage": damage_taken,
+                        "is_critical": False
+                    }
+
+                self.combat_turn += 1
+                return {
+                    "message": pacte_result,
+                    "action": "skill_attack",
+                    "skill_type": skill_type,
+                    "total_damage": total_damage,
+                    "enemy_damage": enemy_damage,
+                    "is_critical": False,
+                    "player_health": self.player_stats["health"],
+                    "enemy_health": self.current_enemy.get("health", 0)
+                }
+
+            return {
+                "message": pacte_result + " (" + t("Hors combat", self.language) + ")",
+                "action": "none",
+                "skill_type": skill_type
+            }
 
         damage_multiplier = skill_data.get("damage_multiplier", 1.0)
         hits = skill_data.get("hits", 1)
@@ -1131,10 +1872,8 @@ class GameEngine:
             result += t("Dégâts totaux:", self.language) + f" {total_damage}\n"
             
             # Déterminer si c'est un coup critique pour les compétences
-            if skill_data.get("guaranteed_crit"):
-                is_critical = True
-            else:
-                is_critical = random.random() < (0.15 + self.innate_crit_chance)
+            pacte_crit_skill = self.pacte_crit_bonus if self.pacte_fievre_turns > 0 else 0.0
+            is_critical = random.random() < (0.15 + self.innate_crit_chance + pacte_crit_skill)
             # Pilleur : Cascade Critique sur skill
             if is_critical and self.player_class == "Pilleur" and "Cascade Critique" in self.unlocked_skills:
                 heal_amount = self.heal(int(total_damage * 0.25))
@@ -1168,8 +1907,8 @@ class GameEngine:
                     result += f"\n🔍 {t('Fouille Accrue :', self.language)} +{fouille_gold} " + t("or bonus !", self.language)
 
                 self.player_stats["gold"] += gold_gain
-                self.update_quest_progress(enemy_name=enemy_name)
-                self.update_quest_progress(gold_gain=gold_gain)
+                self.update_dynamic_quest_progress("kill_enemies")
+                self.update_dynamic_quest_progress("collect_gold", gold_gain)
                 self.add_exp(exp_gain)
                 self.total_enemies_defeated += 1
 
@@ -1189,14 +1928,6 @@ class GameEngine:
                     else:
                         loot = {}
                         result += f"\n🎲 {t('Double ou Rien : RIEN ! Loot perdu...', self.language)}\n"
-
-                # Pilleur : Dévaliser — loot épique garanti
-                if skill_data.get("guaranteed_loot_rarity"):
-                    rarity = skill_data["guaranteed_loot_rarity"]
-                    if rarity in LOOT_BY_RARITY:
-                        guaranteed_item = random.choice(LOOT_BY_RARITY[rarity])
-                        loot[guaranteed_item] = loot.get(guaranteed_item, 0) + 1
-                        result += f"\n🏴‍☠️ {t('Dévaliser :', self.language)} {guaranteed_item} ({rarity}) !\n"
 
                 if loot:
                     for item, qty in loot.items():
@@ -1241,28 +1972,35 @@ class GameEngine:
                 def_boost -= berserk_penalty
             enemy_damage = max(1, enemy_damage - (player_defense + def_boost) // 2)
 
-            self.take_damage(enemy_damage)
-            result += f"\n{self.current_enemy['name']} " + t("riposte et inflige", self.language) + f" {enemy_damage} " + t("dégâts !", self.language)
+            damage_taken, death_message = self.take_damage(enemy_damage)
+            result += f"\n{self.current_enemy['name']} " + t("riposte et inflige", self.language) + f" {damage_taken} " + t("dégâts !", self.language)
 
             if self.player_stats['health'] <= 0:
                 result += "\n" + t("Vous avez été vaincu !", self.language)
+                if death_message:
+                    result += "\n" + death_message
                 self.in_combat = False
                 self.current_enemy = None
                 self.enemy_health = 0
                 self.enemy_max_health = 0
-                self.reset_health()
+                # En arène : ne pas réinitialiser la santé
+                if not self.in_arena:
+                    self.reset_health()
                 return {
                     "message": result,
                     "action": "skill_attack",
                     "skill_type": skill_type,
                     "total_damage": total_damage,
-                    "enemy_damage": enemy_damage,
+                    "enemy_damage": damage_taken,
                     "is_critical": is_critical,
                     "hits": hits,
                     "player_health": self.player_stats['health'],
                     "enemy_health": self.enemy_health
                 }
 
+            # Tick Fièvre de l'Or (Pacte Doré)
+            if self.pacte_fievre_turns > 0:
+                self.pacte_fievre_turns -= 1
             self.combat_turn += 1
             return {
                 "message": result,
@@ -1291,8 +2029,11 @@ class GameEngine:
             self.enemy_max_health = 0
             return t("Vous avez réussi à fuir!", self.language)
         enemy_damage = self.current_enemy.get("attack", 5) + random.randint(-2, 3)
-        self.take_damage(enemy_damage)
-        return t("Vous n'avez pas pu fuir!", self.language) + " " + t("L'ennemi vous a infligé", self.language) + f" {enemy_damage} " + t("dégâts.", self.language)
+        damage_taken, death_message = self.take_damage(enemy_damage)
+        flee_message = t("Vous n'avez pas pu fuir!", self.language) + " " + t("L'ennemi vous a infligé", self.language) + f" {damage_taken} " + t("dégâts.", self.language)
+        if death_message:
+            flee_message += "\n" + death_message
+        return flee_message
     
     def drop_item(self, item_name):
         if item_name not in self.inventory or self.inventory[item_name] <= 0:
@@ -1319,99 +2060,169 @@ class GameEngine:
         return t("Difficulté définie à", self.language) + f" {difficulty}!"
         
 
-    def update_quest_progress(self, enemy_name=None, exp_gain=0, gold_gain=0):
-        """Met à jour la progression de toutes les quêtes actives"""
-        if not DAILY_QUESTS:
+    # ==================== SYSTÈME DE QUÊTES DYNAMIQUES ====================    
+    # ==================== SYSTÈME DE QUÊTES DYNAMIQUES ====================
+    
+    def generate_dynamic_quests(self):
+        """Génère de nouvelles quêtes dynamiques adaptées au niveau du joueur"""
+        if self.player_stats["level"] < DYNAMIC_QUESTS_CONFIG.get("min_level_for_reset", 5):
             return
         
-        # Protection contre les valeurs invalides
-        if exp_gain < 0:
-            exp_gain = 0
-        if gold_gain < 0:
-            gold_gain = 0
+        # Effacer les anciennes quêtes dynamiques
+        self.dynamic_quests = {}
+        self.dynamic_quest_progress = {}
         
-        for quest_id, quest_data in DAILY_QUESTS.items():
-            # Skip already completed quests
-            if quest_id in self.completed_quests:
-                continue
+        # Sélectionner des templates aléatoires
+        from datetime import datetime
+        import random
+        
+        player_level = self.player_stats["level"]
+        max_quests = DYNAMIC_QUESTS_CONFIG.get("max_active_quests", 3)
+        
+        # Obtenir les templates pondérés
+        templates = list(DYNAMIC_QUEST_TEMPLATES.keys())
+        weights = DYNAMIC_QUESTS_CONFIG.get("template_weights", {})
+        default_weight = 1
+        
+        # Créer une liste pondérée
+        weighted_templates = []
+        for template in templates:
+            weight = weights.get(template, default_weight)
+            weighted_templates.extend([template] * weight)
+        
+        # Sélectionner des templates uniques
+        selected_templates = []
+        while len(selected_templates) < max_quests and weighted_templates:
+            template = random.choice(weighted_templates)
+            if template not in selected_templates:
+                selected_templates.append(template)
+                weighted_templates.remove(template)
+        
+        # Générer les quêtes à partir des templates
+        for template_name in selected_templates:
+            template = DYNAMIC_QUEST_TEMPLATES[template_name]
+            quest_id = f"dynamic_{template_name}_{datetime.now().timestamp()}"
             
-            # Initialize progress if not exists
-            if quest_id not in self.quest_progress:
-                self.quest_progress[quest_id] = 0
+            # Calculer les objectifs et récompenses basés sur le niveau
+            target_count = template["target_count_formula"](player_level)
+            reward_exp = template["reward_exp_formula"](player_level)
+            reward_gold = template["reward_gold_formula"](player_level)
+            reward_item = None
+            if template["reward_item_formula"]:
+                reward_item = template["reward_item_formula"](player_level)
             
-            # Utilisation de match/case pour les types de quêtes
-            if 'target_enemy' in quest_data:
-                target_enemy = quest_data['target_enemy']
-                if enemy_name == target_enemy:
-                    self.quest_progress[quest_id] += 1
-                    if self.quest_progress[quest_id] >= quest_data.get('target_count', 1):
-                        self.complete_quest(quest_id)
-            else:
-                match quest_data.get('type'):
-                    case 'gold':
-                        target_gold = quest_data.get('target_gold', 0)
-                        current_gold = self.quest_progress.get(quest_id, 0)
-                        new_gold = current_gold + gold_gain
-                        self.quest_progress[quest_id] = new_gold
-                        if new_gold >= target_gold:
-                            self.complete_quest(quest_id)
-                    case 'exp':
-                        target_exp = quest_data.get('target_exp', 0)
-                        current_exp = self.quest_progress.get(quest_id, 0)
-                        new_exp = current_exp + exp_gain
-                        self.quest_progress[quest_id] = new_exp
-                        if new_exp >= target_exp:
-                            self.complete_quest(quest_id)
+            # Créer la quête
+            self.dynamic_quests[quest_id] = {
+                "template": template_name,
+                "type": template["type"],
+                "target_count": target_count,
+                "reward_exp": reward_exp,
+                "reward_gold": reward_gold,
+                "reward_item": reward_item,
+                "description": template["description_template"].format(count=target_count, level=player_level),
+                "icon": template["icon"],
+                "created_at": datetime.now()
+            }
+            self.dynamic_quest_progress[quest_id] = 0
+        
+        self.last_quest_reset = datetime.now()
     
-    def complete_quest(self, quest_id):
-        if quest_id not in DAILY_QUESTS:
-            return False
-        if quest_id in self.completed_quests:
-            return False
+    def reset_dynamic_quests(self):
+        """Reset les quêtes dynamiques (appelé manuellement ou automatiquement)"""
+        from datetime import datetime, timedelta
         
-        quest_data = DAILY_QUESTS[quest_id]
+        # Vérifier si on peut reset (cooldown)
+        cooldown_hours = DYNAMIC_QUESTS_CONFIG.get("cooldown_hours", 168)
+        if self.last_quest_reset:
+            time_since_reset = datetime.now() - self.last_quest_reset
+            if time_since_reset < timedelta(hours=cooldown_hours):
+                # Pas encore le temps de reset
+                remaining = timedelta(hours=cooldown_hours) - time_since_reset
+                hours_remaining = int(remaining.total_seconds() / 3600)
+                return f"Trop tôt pour reset! Attendez encore {hours_remaining} heures."
         
-        # Vérifier que la quête est effectivement accomplie avec match/case
-        quest_completed = False
-        if 'target_enemy' in quest_data:
-            # Quête de type "tuer X ennemis"
-            target_count = quest_data.get('target_count', 1)
-            if self.quest_progress.get(quest_id, 0) >= target_count:
-                quest_completed = True
-        else:
-            match quest_data.get('type'):
-                case 'gold':
-                    # Quête de type "amasser X or"
-                    target_gold = quest_data.get('target_gold', 0)
-                    if self.quest_progress.get(quest_id, 0) >= target_gold:
-                        quest_completed = True
-                case 'exp':
-                    # Quête de type "gagner X XP"
-                    target_exp = quest_data.get('target_exp', 0)
-                    if self.quest_progress.get(quest_id, 0) >= target_exp:
-                        quest_completed = True
-                case _:
-                    # Quête sans type spécifique, on la considère comme accomplie
-                    quest_completed = True
+        # Générer de nouvelles quêtes
+        self.generate_dynamic_quests()
+        return "Quêtes dynamiques réinitialisées!"
+    
+    def update_dynamic_quest_progress(self, action_type, value=1):
+        """Met à jour la progression des quêtes dynamiques"""
+        for quest_id, quest in self.dynamic_quests.items():
+            if quest["type"] == action_type:
+                self.dynamic_quest_progress[quest_id] = self.dynamic_quest_progress.get(quest_id, 0) + value
+    
+    def complete_dynamic_quest(self, quest_id):
+        """Essaie de compléter une quête dynamique"""
+        if quest_id not in self.dynamic_quests:
+            return False, "Quête introuvable"
         
-        if not quest_completed:
-            return False
+        if quest_id in self.dynamic_quests_completed:
+            return False, "Quête déjà complétée"
         
-        # Marquer la quête comme complétée AVANT de donner les récompenses
-        # pour éviter la récursion infinie
-        self.completed_quests.append(quest_id)
+        quest = self.dynamic_quests[quest_id]
+        progress = self.dynamic_quest_progress.get(quest_id, 0)
         
-        exp_reward = quest_data.get("reward_exp", 0)
-        gold_reward = quest_data.get("reward_gold", 0)
-        self.add_exp(exp_reward)  # add_exp met à jour les quêtes d'XP
+        if progress < quest["target_count"]:
+            return False, f"Il reste {quest['target_count'] - progress} à accomplir"
+        
+        # Marquer comme complétée
+        self.dynamic_quests_completed.append(quest_id)
+        
+        # Donner les récompenses
+        exp_reward = quest.get("reward_exp", 0)
+        gold_reward = quest.get("reward_gold", 0)
+        reward_item = quest.get("reward_item")
+        
+        self.add_exp(exp_reward)
         self.player_stats["gold"] += gold_reward
-        # NOTE: On ne met PAS à jour les quêtes avec les récompenses pour éviter:
-        # 1. La récursion infinie (récompense or → quête or → nouvelle récompense → ...)
-        # 2. L'exploitation (compléter une quête → recevoir or → compléter quête or → recevoir plus or)
-        if quest_data.get("reward_item"):
-            reward_item = quest_data["reward_item"]
+        
+        if reward_item and reward_item in ITEMS:
             self.inventory[reward_item] = self.inventory.get(reward_item, 0) + 1
-        return True
+        
+        # Supprimer la quête des actives
+        del self.dynamic_quests[quest_id]
+        del self.dynamic_quest_progress[quest_id]
+        
+        return True, f"Quête '{quest['template']}' complétée! +{exp_reward} XP, +{gold_reward} or"
+    
+    def get_dynamic_quests_display(self):
+        """Retourne les quêtes dynamiques pour l'affichage"""
+        quests_display = []
+        for quest_id, quest in self.dynamic_quests.items():
+            progress = self.dynamic_quest_progress.get(quest_id, 0)
+            quests_display.append({
+                "id": quest_id,
+                "template": quest["template"],
+                "description": quest["description"],
+                "icon": quest["icon"],
+                "progress": progress,
+                "target": quest["target_count"],
+                "reward_exp": quest["reward_exp"],
+                "reward_gold": quest["reward_gold"],
+                "reward_item": quest.get("reward_item"),
+                "is_complete": progress >= quest["target_count"]
+            })
+        return quests_display
+    
+    def check_dynamic_quests_auto_reset(self):
+        """Vérifie si les quêtes doivent être reset automatiquement"""
+        from datetime import datetime, timedelta
+        
+        if self.player_stats["level"] < DYNAMIC_QUESTS_CONFIG.get("min_level_for_reset", 5):
+            return
+        
+        if self.last_quest_reset is None:
+            # Première fois, générer des quêtes
+            self.generate_dynamic_quests()
+            return
+        
+        reset_type = DYNAMIC_QUESTS_CONFIG.get("reset_type", "weekly")
+        cooldown_hours = DYNAMIC_QUESTS_CONFIG.get("cooldown_hours", 168)
+        
+        time_since_reset = datetime.now() - self.last_quest_reset
+        
+        if time_since_reset >= timedelta(hours=cooldown_hours):
+            self.generate_dynamic_quests()
     
     def check_win(self):
         if self.player_stats["level"] >= 50:
@@ -1680,8 +2491,8 @@ class GameEngine:
         }
 
         details[t("Quêtes complétées", self.language)] = {
-            "value": len(self.completed_quests),
-            "points": len(self.completed_quests) * 200,
+            "value": len(self.dynamic_quests_completed),
+            "points": len(self.dynamic_quests_completed) * 200,
             "icon": "📜"
         }
 
