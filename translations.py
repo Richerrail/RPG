@@ -1,0 +1,1 @@
+from GamePython.translations import *
