@@ -10,7 +10,6 @@ from flask import Flask, render_template, request, session, redirect, url_for, j
 from game_engine import GameEngine
 from game_config import GAME_CONFIG, ITEMS, CLASSES, SKILLS, LOCATIONS, SHOPS
 from translations import t
-import webbrowser
 import threading
 import os
 import json
